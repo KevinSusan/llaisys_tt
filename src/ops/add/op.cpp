@@ -7,6 +7,7 @@
 
 namespace llaisys::ops {
 void add(tensor_t c, tensor_t a, tensor_t b) {
+    //确保所有张量都在同一设备上
     CHECK_SAME_DEVICE(c, a, b);
     // Only support contiguous inputs with same shape for now.
     CHECK_SAME_SHAPE(c->shape(), a->shape(), b->shape());
