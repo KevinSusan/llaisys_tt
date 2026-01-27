@@ -1,4 +1,4 @@
-from typing import Sequence
+from typing import Sequence, Iterable, Mapping, Optional
 import warnings
 from ctypes import byref, c_int, c_size_t, c_float, c_int64, c_uint32, c_void_p
 import json
@@ -18,7 +18,41 @@ from ..libllaisys import (
 )
 
 
+def format_chat_prompt(
+    messages: Iterable[Mapping[str, str]],
+    system_prompt: Optional[str] = None,
+    add_generation_prompt: bool = True,
+) -> str:
+    lines: list[str] = []
+    if system_prompt:
+        lines.append(f"System: {system_prompt}")
+    for msg in messages:
+        role = str(msg.get("role", "")).strip().lower()
+        content = str(msg.get("content", "")).strip()
+        if not role or content == "":
+            raise ValueError("Each message must have non-empty role and content")
+        if role == "system":
+            label = "System"
+        elif role == "assistant":
+            label = "Assistant"
+        else:
+            label = "User"
+        lines.append(f"{label}: {content}")
+    if add_generation_prompt:
+        if not lines or not lines[-1].startswith("Assistant:"):
+            lines.append("Assistant: ")
+    return "\n".join(lines)
+
+
 class Qwen2:
+    @staticmethod
+    def build_prompt(
+        messages: Iterable[Mapping[str, str]],
+        system_prompt: Optional[str] = None,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        return format_chat_prompt(messages, system_prompt, add_generation_prompt)
+
 
     def __init__(self, model_path, device: DeviceType = DeviceType.CPU):
         model_path = Path(model_path)

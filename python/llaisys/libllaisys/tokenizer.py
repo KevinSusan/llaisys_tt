@@ -28,5 +28,10 @@ def load_tokenizer(lib):
     ]
     lib.llaisysTokenizerDecode.restype = c_int
 
+    lib.llaisysTokenizerTokenToId.argtypes = [LlaisysTokenizer, c_char_p]
+    lib.llaisysTokenizerTokenToId.restype = c_int64
+    lib.llaisysTokenizerIdToToken.argtypes = [LlaisysTokenizer, c_int64, c_char_p, c_size_t]
+    lib.llaisysTokenizerIdToToken.restype = c_int
+
 
 __all__ = ["LlaisysTokenizer", "load_tokenizer"]

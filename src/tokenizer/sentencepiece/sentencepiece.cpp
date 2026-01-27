@@ -33,6 +33,22 @@ public:
         return status.ok();
     }
 
+    bool pieceToId(const std::string &piece, int64_t &out_id) const {
+        int id = _sp.PieceToId(piece);
+        if (id < 0) return false;
+        std::string check = _sp.IdToPiece(id);
+        if (check != piece) return false;
+        out_id = static_cast<int64_t>(id);
+        return true;
+    }
+
+    bool idToPiece(int64_t id, std::string &out_piece) const {
+        if (id < 0) return false;
+        if (id >= static_cast<int64_t>(_sp.GetPieceSize())) return false;
+        out_piece = _sp.IdToPiece(static_cast<int>(id));
+        return !out_piece.empty();
+    }
+
 private:
     sentencepiece::SentencePieceProcessor _sp;
 };
@@ -86,6 +102,28 @@ bool SentencePieceTokenizer::decode(const int64_t *ids, size_t len, std::string 
     (void)ids;
     (void)len;
     out_text.clear();
+    return false;
+#endif
+}
+
+bool SentencePieceTokenizer::pieceToId(const std::string &piece, int64_t &out_id) const {
+#ifdef LLAISYS_ENABLE_SENTENCEPIECE
+    if (!_impl) return false;
+    return _impl->pieceToId(piece, out_id);
+#else
+    (void)piece;
+    out_id = -1;
+    return false;
+#endif
+}
+
+bool SentencePieceTokenizer::idToPiece(int64_t id, std::string &out_piece) const {
+#ifdef LLAISYS_ENABLE_SENTENCEPIECE
+    if (!_impl) return false;
+    return _impl->idToPiece(id, out_piece);
+#else
+    (void)id;
+    out_piece.clear();
     return false;
 #endif
 }

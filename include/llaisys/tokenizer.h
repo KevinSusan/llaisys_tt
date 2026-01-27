@@ -28,6 +28,18 @@ __C {
                                         size_t len,
                                         char *out_text,
                                         size_t max_len);
+
+    // Map a single token string to its id. Returns -1 if not found.
+    __export int64_t llaisysTokenizerTokenToId(struct LlaisysTokenizer *tokenizer, const char *token);
+
+    // Map a token id to its string.
+    // If out_token is null or max_len is 0, returns the required length (including null terminator).
+    // On error returns -1.
+    __export int llaisysTokenizerIdToToken(struct LlaisysTokenizer *tokenizer,
+                                           int64_t id,
+                                           char *out_token,
+                                           size_t max_len);
+
 }
 
 #endif // LLAISYS_TOKENIZER_H

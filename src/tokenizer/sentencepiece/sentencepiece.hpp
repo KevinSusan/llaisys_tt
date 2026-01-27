@@ -16,6 +16,8 @@ public:
 
     bool encode(const std::string &text, std::vector<int64_t> &out_ids) const;
     bool decode(const int64_t *ids, size_t len, std::string &out_text) const;
+    bool pieceToId(const std::string &piece, int64_t &out_id) const;
+    bool idToPiece(int64_t id, std::string &out_piece) const;
 
 private:
 #ifdef LLAISYS_ENABLE_SENTENCEPIECE

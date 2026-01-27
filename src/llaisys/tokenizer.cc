@@ -57,4 +57,28 @@ __export int llaisysTokenizerDecode(struct LlaisysTokenizer *tokenizer,
     out_text[n] = '\0';
     return static_cast<int>(n);
 }
+
+__export int64_t llaisysTokenizerTokenToId(struct LlaisysTokenizer *tokenizer, const char *token) {
+    if (!tokenizer || !tokenizer->impl || !token) return -1;
+    int64_t id = -1;
+    if (!tokenizer->impl->pieceToId(token, id)) return -1;
+    return id;
+}
+
+__export int llaisysTokenizerIdToToken(struct LlaisysTokenizer *tokenizer,
+                                       int64_t id,
+                                       char *out_token,
+                                       size_t max_len) {
+    if (!tokenizer || !tokenizer->impl) return -1;
+    std::string piece;
+    if (!tokenizer->impl->idToPiece(id, piece)) return -1;
+    if (!out_token || max_len == 0) {
+        return static_cast<int>(piece.size() + 1);
+    }
+    const size_t n = piece.size() < (max_len - 1) ? piece.size() : (max_len - 1);
+    std::memcpy(out_token, piece.data(), n);
+    out_token[n] = '\0';
+    return static_cast<int>(n);
+}
+
 }
