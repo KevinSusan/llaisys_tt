@@ -144,8 +144,16 @@ textarea {
   gap: 12px;
 }
 
-.actions input {
-  width: 120px;
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.actions input,
+.actions select {
+  width: 110px;
   padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid #2b2f3a;

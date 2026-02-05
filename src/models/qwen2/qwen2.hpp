@@ -20,6 +20,8 @@ public:
     int64_t infer(const int64_t *token_ids, size_t ntoken);
     int64_t prefill(const int64_t *token_ids, size_t ntoken);
     int64_t step(const int64_t *token_ids, size_t ntoken);
+    int64_t prefillSampling(const int64_t *token_ids, size_t ntoken, const LlaisysSamplingParams *params);
+    int64_t stepSampling(const int64_t *token_ids, size_t ntoken, const LlaisysSamplingParams *params);
     void resetKVCache();
     void setKVCacheEnabled(bool enabled);
 

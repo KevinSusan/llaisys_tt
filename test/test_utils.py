@@ -1,10 +1,12 @@
+from typing import Tuple
+
 import llaisys
 import torch
 
 
 def random_tensor(
     shape, dtype_name, device_name, device_id=0, scale=None, bias=None
-) -> tuple[torch.Tensor, llaisys.Tensor]:
+) -> Tuple[torch.Tensor, llaisys.Tensor]:
     torch_tensor = torch.rand(
         shape,
         dtype=torch_dtype(dtype_name),
@@ -64,7 +66,7 @@ def random_int_tensor(shape, device_name, dtype_name="i64", device_id=0, low=0, 
 
 def zero_tensor(
     shape, dtype_name, device_name, device_id=0
-) -> tuple[torch.Tensor, llaisys.Tensor]:
+) -> Tuple[torch.Tensor, llaisys.Tensor]:
     torch_tensor = torch.zeros(
         shape,
         dtype=torch_dtype(dtype_name),
@@ -92,7 +94,7 @@ def zero_tensor(
 
 def arrange_tensor(
     start, end, device_name, device_id=0
-) -> tuple[torch.Tensor, llaisys.Tensor]:
+) -> Tuple[torch.Tensor, llaisys.Tensor]:
     torch_tensor = torch.arange(start, end, device=torch_device(device_name, device_id))
     llaisys_tensor = llaisys.Tensor(
         (end - start,),

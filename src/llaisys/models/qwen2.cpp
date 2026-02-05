@@ -163,12 +163,52 @@ __C {
 		}
 	}
 
+	__export int64_t llaisysQwen2ModelPrefillSampling(struct LlaisysQwen2Model *model,
+	                                                  int64_t *token_ids,
+	                                                  size_t ntoken,
+	                                                  const LlaisysSamplingParams *params) {
+		if (!model || !model->impl) return -1;
+		try {
+			return model->impl->prefillSampling(token_ids, ntoken, params);
+		} catch (const std::exception &e) {
+			std::cerr << "[ERROR] Qwen2 prefill sampling failed: " << e.what() << std::endl;
+			return -1;
+		} catch (...) {
+			std::cerr << "[ERROR] Qwen2 prefill sampling failed: unknown exception" << std::endl;
+			return -1;
+		}
+	}
+
+	__export int64_t llaisysQwen2ModelStepSampling(struct LlaisysQwen2Model *model,
+	                                               int64_t *token_ids,
+	                                               size_t ntoken,
+	                                               const LlaisysSamplingParams *params) {
+		if (!model || !model->impl) return -1;
+		try {
+			return model->impl->stepSampling(token_ids, ntoken, params);
+		} catch (const std::exception &e) {
+			std::cerr << "[ERROR] Qwen2 step sampling failed: " << e.what() << std::endl;
+			return -1;
+		} catch (...) {
+			std::cerr << "[ERROR] Qwen2 step sampling failed: unknown exception" << std::endl;
+			return -1;
+		}
+	}
+
 	__export int64_t llaisysQwen2ModelInferSampling(struct LlaisysQwen2Model *model,
 	                                                int64_t *token_ids,
 	                                                size_t ntoken,
 	                                                const LlaisysSamplingParams *params) {
 		if (!model || !model->impl) return -1;
-		return llaisysQwen2ModelInfer(model, token_ids, ntoken);
+		try {
+			return model->impl->prefillSampling(token_ids, ntoken, params);
+		} catch (const std::exception &e) {
+			std::cerr << "[ERROR] Qwen2 infer sampling failed: " << e.what() << std::endl;
+			return -1;
+		} catch (...) {
+			std::cerr << "[ERROR] Qwen2 infer sampling failed: unknown exception" << std::endl;
+			return -1;
+		}
 	}
 
 	__export int64_t llaisysQwen2ModelInferSamplingEx(struct LlaisysQwen2Model *model,
@@ -179,7 +219,12 @@ __C {
 	                                                  float temperature,
 	                                                  uint32_t seed) {
 		if (!model || !model->impl) return -1;
-		return llaisysQwen2ModelInfer(model, token_ids, ntoken);
+		LlaisysSamplingParams params{};
+		params.top_k = top_k;
+		params.top_p = top_p;
+		params.temperature = temperature;
+		params.seed = seed;
+		return llaisysQwen2ModelInferSampling(model, token_ids, ntoken, &params);
 	}
 
 	__export void llaisysQwen2ModelResetKVCache(struct LlaisysQwen2Model *model) {

@@ -76,6 +76,22 @@ def load_models(lib):
     lib.llaisysQwen2ModelStep.argtypes = [LlaisysQwen2Model, POINTER(c_int64), c_size_t]
     lib.llaisysQwen2ModelStep.restype = c_int64
 
+    lib.llaisysQwen2ModelPrefillSampling.argtypes = [
+        LlaisysQwen2Model,
+        POINTER(c_int64),
+        c_size_t,
+        POINTER(LlaisysSamplingParams),
+    ]
+    lib.llaisysQwen2ModelPrefillSampling.restype = c_int64
+
+    lib.llaisysQwen2ModelStepSampling.argtypes = [
+        LlaisysQwen2Model,
+        POINTER(c_int64),
+        c_size_t,
+        POINTER(LlaisysSamplingParams),
+    ]
+    lib.llaisysQwen2ModelStepSampling.restype = c_int64
+
     lib.llaisysQwen2ModelInferSampling.argtypes = [
         LlaisysQwen2Model,
         POINTER(c_int64),

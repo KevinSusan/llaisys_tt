@@ -43,6 +43,9 @@ target("llaisys-device")
     set_kind("static")
     add_deps("llaisys-utils")
     add_deps("llaisys-device-cpu")
+    if has_config("nv-gpu") then
+        add_deps("llaisys-device-nvidia")
+    end
 
     set_languages("cxx17")
     set_warnings("all", "error")
@@ -89,6 +92,9 @@ target_end()
 target("llaisys-ops")
     set_kind("static")
     add_deps("llaisys-ops-cpu")
+    if has_config("nv-gpu") then
+        add_deps("llaisys-ops-nvidia")
+    end
 
     set_languages("cxx17")
     set_warnings("all", "error")
@@ -121,6 +127,12 @@ target("llaisys")
     if has_config("sentencepiece") then
         add_defines("LLAISYS_ENABLE_SENTENCEPIECE")
         add_links("sentencepiece")
+    end
+    if has_config("nv-gpu") then
+        set_languages("cxx17", "cuda")
+        set_policy("build.cuda.devlink", true)
+        add_links("cudadevrt", "cudart")
+        add_files("src/device/nvidia/devlink_stub.cu")
     end
 
     

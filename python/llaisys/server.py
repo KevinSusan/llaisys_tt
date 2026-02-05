@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 import time
 import uuid
@@ -64,6 +65,20 @@ class ChatService:
         self._pool_lock = threading.Lock()
         self._model_locks = [threading.Lock() for _ in models]
         self._model_owner: Dict[int, str] = {}
+        self._filter_tokens = ("</think>", "<|end_of_sentence|>")
+        self._filter_patterns = [
+            re.compile(r"<\s*\|\s*end_of_sentence\s*\|\s*>", re.IGNORECASE),
+            re.compile(r"<\s*\|[^>]*\|\s*>"),
+            re.compile(r"<\s*[\|\uFF5C][^>]*[\|\uFF5C]\s*>"),
+            re.compile(r"<\s*[\|\uFF5C]\s*end[\s_\u2581]*of[\s_\u2581]*sentence\s*[\|\uFF5C]\s*>", re.IGNORECASE),
+        ]
+
+    def _postprocess_text(self, text: str) -> str:
+        for token in self._filter_tokens:
+            text = text.replace(token, "")
+        for pattern in self._filter_patterns:
+            text = pattern.sub("", text)
+        return text
 
     def _extract_messages(self, payload: Dict[str, Any]) -> tuple[str, List[Dict[str, str]]]:
         session_id = str(payload.get("session_id") or "").strip()
@@ -99,16 +114,51 @@ class ChatService:
         tokens: List[int],
         prompt_ids: List[int],
         max_new_tokens: int,
+        sampling: Dict[str, Any],
     ) -> Iterable[int]:
+        top_k = int(sampling.get("top_k", 1))
+        top_p = float(sampling.get("top_p", 0.0))
+        temperature = float(sampling.get("temperature", 0.0))
+        seed = int(sampling.get("seed", 0))
+        mode = str(sampling.get("mode", "")).strip().lower()
+        if mode == "argmax":
+            use_sampling = False
+        elif mode == "sample":
+            use_sampling = True
+        else:
+            use_sampling = temperature > 0.0 or top_k > 1 or top_p > 0.0
+
         reuse_cache = bool(tokens) and prompt_ids[: len(tokens)] == tokens
         new_prompt = prompt_ids[len(tokens) :]
         if reuse_cache and new_prompt:
-            next_token = int(model.step(new_prompt))
+            if use_sampling:
+                next_token = int(
+                    model.step_sampling(
+                        new_prompt,
+                        top_k=top_k,
+                        top_p=top_p,
+                        temperature=temperature,
+                        seed=seed,
+                    )
+                )
+            else:
+                next_token = int(model.step(new_prompt))
             tokens[:] = list(prompt_ids)
         else:
             model.reset_kv_cache()
             tokens[:] = list(prompt_ids)
-            next_token = int(model.prefill(prompt_ids))
+            if use_sampling:
+                next_token = int(
+                    model.prefill_sampling(
+                        prompt_ids,
+                        top_k=top_k,
+                        top_p=top_p,
+                        temperature=temperature,
+                        seed=seed,
+                    )
+                )
+            else:
+                next_token = int(model.prefill(prompt_ids))
         if next_token < 0:
             return
         eos = self._eos_token(model)
@@ -117,7 +167,18 @@ class ChatService:
         for _ in range(max_new_tokens - 1):
             if eos >= 0 and next_token == eos:
                 break
-            next_token = int(model.step([next_token]))
+            if use_sampling:
+                next_token = int(
+                    model.step_sampling(
+                        [next_token],
+                        top_k=top_k,
+                        top_p=top_p,
+                        temperature=temperature,
+                        seed=seed,
+                    )
+                )
+            else:
+                next_token = int(model.step([next_token]))
             if next_token < 0:
                 break
             yield next_token
@@ -153,6 +214,13 @@ class ChatService:
     def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         system_prompt = payload.get("system_prompt")
         max_new_tokens = int(payload.get("max_new_tokens", 128))
+        sampling = {
+            "mode": payload.get("sampling"),
+            "top_k": payload.get("top_k", 1),
+            "top_p": payload.get("top_p", 0.0),
+            "temperature": payload.get("temperature", 0.0),
+            "seed": payload.get("seed", 0),
+        }
 
         session_id, messages = self._extract_messages(payload)
         if not session_id:
@@ -168,10 +236,12 @@ class ChatService:
         model_idx, tokens = self._prepare_session(session_id, messages)
         model = self.models[model_idx]
         with self._model_locks[model_idx]:
-            for token_id in self._iter_generate_ids(model, tokens, prompt_ids, max_new_tokens):
+            for token_id in self._iter_generate_ids(
+                model, tokens, prompt_ids, max_new_tokens, sampling
+            ):
                 generated_ids.append(int(token_id))
 
-        response_text = self.tokenizer.decode(generated_ids)
+        response_text = self._postprocess_text(self.tokenizer.decode(generated_ids))
 
         messages = list(messages)
         messages.append({"role": "assistant", "content": response_text})
@@ -190,6 +260,13 @@ class ChatService:
     def stream(self, payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
         system_prompt = payload.get("system_prompt")
         max_new_tokens = int(payload.get("max_new_tokens", 128))
+        sampling = {
+            "mode": payload.get("sampling"),
+            "top_k": payload.get("top_k", 1),
+            "top_p": payload.get("top_p", 0.0),
+            "temperature": payload.get("temperature", 0.0),
+            "seed": payload.get("seed", 0),
+        }
 
         session_id, messages = self._extract_messages(payload)
         prompt = Qwen2.build_prompt(
@@ -204,25 +281,30 @@ class ChatService:
 
         generated_ids: List[int] = []
         decoded = ""
+        filtered = ""
         model_idx, tokens = self._prepare_session(session_id, messages)
         model = self.models[model_idx]
         with self._model_locks[model_idx]:
-            for token_id in self._iter_generate_ids(model, tokens, prompt_ids, max_new_tokens):
+            for token_id in self._iter_generate_ids(
+                model, tokens, prompt_ids, max_new_tokens, sampling
+            ):
                 generated_ids.append(int(token_id))
                 new_text = self.tokenizer.decode(generated_ids)
-                delta = new_text[len(decoded) :]
+                new_filtered = self._postprocess_text(new_text)
+                delta = new_filtered[len(filtered) :]
                 decoded = new_text
+                filtered = new_filtered
                 if delta:
                     yield {"session_id": session_id, "delta": delta, "done": False}
 
         messages = list(messages)
-        messages.append({"role": "assistant", "content": decoded})
+        messages.append({"role": "assistant", "content": filtered})
         self.sessions.set_state(session_id, messages, model_idx, tokens)
 
         yield {
             "session_id": session_id,
             "done": True,
-            "response": decoded,
+            "response": filtered,
             "usage": {
                 "prompt_tokens": len(prompt_ids),
                 "completion_tokens": len(generated_ids),

@@ -6,6 +6,11 @@ const form = document.getElementById("chat-form");
 const promptInput = document.getElementById("prompt");
 const endpointInput = document.getElementById("endpoint");
 const maxTokensInput = document.getElementById("max-tokens");
+const samplingModeInput = document.getElementById("sampling-mode");
+const temperatureInput = document.getElementById("temperature");
+const topKInput = document.getElementById("top-k");
+const topPInput = document.getElementById("top-p");
+const seedInput = document.getElementById("seed");
 const sendButton = document.getElementById("send");
 const sessionList = document.getElementById("session-list");
 const newChatButton = document.getElementById("new-chat");
@@ -121,7 +126,14 @@ form.addEventListener("submit", async (event) => {
   const payload = {
     prompt,
     max_new_tokens: Number(maxTokensInput.value) || 128,
+    temperature: Number(temperatureInput.value) || 0,
+    top_k: Number(topKInput.value) || 1,
+    top_p: Number(topPInput.value) || 0,
+    seed: Number(seedInput.value) || 0,
   };
+  if (samplingModeInput.value) {
+    payload.sampling = samplingModeInput.value;
+  }
   if (convo.serverId) {
     payload.session_id = convo.serverId;
   }

@@ -253,16 +253,28 @@ class Qwen2:
         tokens = list(inputs)
         if max_new_tokens is None:
             max_new_tokens = 128
+        use_sampling = temperature > 0 or top_k > 1 or top_p > 0
 
         # prefill with full prompt
-        token_buf = (c_int64 * len(tokens))(*tokens)
-        next_token = int(
-            LIB_LLAISYS.llaisysQwen2ModelPrefill(
-                self._model,
-                token_buf,
-                c_size_t(len(tokens)),
+        if use_sampling:
+            next_token = int(
+                self.prefill_sampling(
+                    tokens,
+                    top_k=top_k,
+                    top_p=top_p,
+                    temperature=temperature,
+                    seed=seed,
+                )
             )
-        )
+        else:
+            token_buf = (c_int64 * len(tokens))(*tokens)
+            next_token = int(
+                LIB_LLAISYS.llaisysQwen2ModelPrefill(
+                    self._model,
+                    token_buf,
+                    c_size_t(len(tokens)),
+                )
+            )
         if next_token < 0:
             return tokens
         tokens.append(next_token)
@@ -279,14 +291,25 @@ class Qwen2:
                 break
             if self._meta.end_token >= 0 and next_token == self._meta.end_token:
                 break
-            token_buf = (c_int64 * 1)(next_token)
-            next_token = int(
-                LIB_LLAISYS.llaisysQwen2ModelStep(
-                    self._model,
-                    token_buf,
-                    c_size_t(1),
+            if use_sampling:
+                next_token = int(
+                    self.step_sampling(
+                        [next_token],
+                        top_k=top_k,
+                        top_p=top_p,
+                        temperature=temperature,
+                        seed=seed,
+                    )
                 )
-            )
+            else:
+                token_buf = (c_int64 * 1)(next_token)
+                next_token = int(
+                    LIB_LLAISYS.llaisysQwen2ModelStep(
+                        self._model,
+                        token_buf,
+                        c_size_t(1),
+                    )
+                )
             if next_token < 0:
                 break
             tokens.append(next_token)
@@ -312,6 +335,56 @@ class Qwen2:
                 self._model,
                 token_buf,
                 c_size_t(len(tokens)),
+            )
+        )
+
+    def prefill_sampling(
+        self,
+        inputs: Sequence[int],
+        top_k: int = 1,
+        top_p: float = 0.0,
+        temperature: float = 0.0,
+        seed: int = 0,
+    ) -> int:
+        tokens = list(inputs)
+        token_buf = (c_int64 * len(tokens))(*tokens)
+        params = LlaisysSamplingParams(
+            c_int(top_k),
+            c_float(top_p),
+            c_float(temperature),
+            c_uint32(seed),
+        )
+        return int(
+            LIB_LLAISYS.llaisysQwen2ModelPrefillSampling(
+                self._model,
+                token_buf,
+                c_size_t(len(tokens)),
+                byref(params),
+            )
+        )
+
+    def step_sampling(
+        self,
+        new_tokens: Sequence[int],
+        top_k: int = 1,
+        top_p: float = 0.0,
+        temperature: float = 0.0,
+        seed: int = 0,
+    ) -> int:
+        tokens = list(new_tokens)
+        token_buf = (c_int64 * len(tokens))(*tokens)
+        params = LlaisysSamplingParams(
+            c_int(top_k),
+            c_float(top_p),
+            c_float(temperature),
+            c_uint32(seed),
+        )
+        return int(
+            LIB_LLAISYS.llaisysQwen2ModelStepSampling(
+                self._model,
+                token_buf,
+                c_size_t(len(tokens)),
+                byref(params),
             )
         )
 

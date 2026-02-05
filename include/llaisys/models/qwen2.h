@@ -64,6 +64,18 @@ __C {
     //执行千问2模型单步解码（step）
     __export int64_t llaisysQwen2ModelStep(struct LlaisysQwen2Model * model, int64_t * token_ids, size_t ntoken);
 
+    //执行千问2模型预填充（prefill，带采样参数）
+    __export int64_t llaisysQwen2ModelPrefillSampling(struct LlaisysQwen2Model * model,
+                                                      int64_t * token_ids,
+                                                      size_t ntoken,
+                                                      const struct LlaisysSamplingParams *params);
+
+    //执行千问2模型单步解码（step，带采样参数）
+    __export int64_t llaisysQwen2ModelStepSampling(struct LlaisysQwen2Model * model,
+                                                   int64_t * token_ids,
+                                                   size_t ntoken,
+                                                   const struct LlaisysSamplingParams *params);
+
     //执行千问2模型推理（带采样参数）
     __export int64_t llaisysQwen2ModelInferSampling(struct LlaisysQwen2Model * model,
                                                     int64_t * token_ids,
