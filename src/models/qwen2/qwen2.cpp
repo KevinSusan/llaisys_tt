@@ -40,14 +40,44 @@ Qwen2::Qwen2(const LlaisysQwen2Meta &meta,
                device_ids) {}
 
 Qwen2::~Qwen2() {
+    clearPackedState();
 }
 
 void Qwen2::resetKVCache() {
+    clearPackedState();
     _decoder.resetKVCache();
 }
 
 void Qwen2::setKVCacheEnabled(bool enabled) {
     _decoder.setKVCacheEnabled(enabled);
+}
+
+void Qwen2::setKVContext(void *ctx, size_t past_len_tokens) {
+    clearPackedState();
+    _kv_ctx = ctx;
+    if (ctx) {
+        _decoder.bindExternalKVContext(ctx, past_len_tokens);
+    } else {
+        _decoder.clearExternalKVContext();
+    }
+}
+
+void *Qwen2::getKVContext() const {
+    return _kv_ctx;
+}
+
+int Qwen2::exportKVContext(void *ctx, size_t block_tokens) {
+    return _decoder.exportKVContext(ctx, block_tokens);
+}
+
+void Qwen2::clearPackedState() {
+    for (auto *ctx : _packed_kv_contexts) {
+        if (ctx) {
+            ::llaisysQwen2KVContextRelease(ctx);
+        }
+    }
+    _packed_kv_contexts.clear();
+    _packed_prompts.clear();
 }
 
 //执行千问2模型推理
@@ -249,6 +279,7 @@ int64_t Qwen2::infer(const int64_t *token_ids, size_t ntoken) {
 
 int64_t Qwen2::prefill(const int64_t *token_ids, size_t ntoken) {
     if (!token_ids || ntoken == 0) return -1;
+    clearPackedState();
 
     const int device_id = _device_ids.empty() ? 0 : _device_ids[0];
     size_t logits_shape[2] = {1, _meta.voc};
@@ -267,6 +298,7 @@ int64_t Qwen2::prefill(const int64_t *token_ids, size_t ntoken) {
 
 int64_t Qwen2::step(const int64_t *token_ids, size_t ntoken) {
     if (!token_ids || ntoken == 0) return -1;
+    clearPackedState();
 
     const int device_id = _device_ids.empty() ? 0 : _device_ids[0];
     size_t logits_shape[2] = {1, _meta.voc};
@@ -282,8 +314,153 @@ int64_t Qwen2::step(const int64_t *token_ids, size_t ntoken) {
     return next_token;
 }
 
+bool Qwen2::prefillPacked(const int64_t *token_ids,
+                          size_t ntoken,
+                          const int64_t *token_offsets,
+                          size_t nseq,
+                          int64_t *out_next_tokens) {
+    if (!token_ids || !token_offsets || nseq == 0 || ntoken == 0 || !out_next_tokens) return false;
+    clearPackedState();
+    if (token_offsets[0] != 0 || static_cast<size_t>(token_offsets[nseq]) != ntoken) return false;
+    for (size_t i = 0; i < nseq; ++i) {
+        if (token_offsets[i] >= token_offsets[i + 1]) return false;
+    }
+    const int device_id = _device_ids.empty() ? 0 : _device_ids[0];
+    size_t logits_shape[2] = {nseq, _meta.voc};
+    llaisysTensor_t logits = tensorCreate(logits_shape, 2, _meta.dtype, _device, device_id);
+    if (!logits) return false;
+    if (!_decoder.prefillPacked(token_ids, ntoken, token_offsets, nseq, logits)) {
+        tensorDestroy(logits);
+        return false;
+    }
+    for (size_t i = 0; i < nseq; ++i) {
+        llaisysTensor_t row = tensorSlice(logits, 0, i, i + 1);
+        if (!row) {
+            tensorDestroy(logits);
+            return false;
+        }
+        out_next_tokens[i] = argmax_from_logits(row, _meta.dtype, _device, device_id);
+        tensorDestroy(row);
+    }
+    tensorDestroy(logits);
+
+    _packed_prompts.resize(nseq);
+    for (size_t i = 0; i < nseq; ++i) {
+        const size_t begin = static_cast<size_t>(token_offsets[i]);
+        const size_t end = static_cast<size_t>(token_offsets[i + 1]);
+        _packed_prompts[i].assign(token_ids + begin, token_ids + end);
+    }
+
+    // Build per-sequence KV snapshots once after packed prefill.
+    constexpr size_t kPackedBlockTokens = 64;
+    _packed_kv_contexts.assign(nseq, nullptr);
+    size_t single_logits_shape[2] = {1, _meta.voc};
+    llaisysTensor_t single_logits = tensorCreate(single_logits_shape, 2, _meta.dtype, _device, device_id);
+    if (!single_logits) {
+        clearPackedState();
+        return false;
+    }
+    for (size_t i = 0; i < nseq; ++i) {
+        _decoder.resetKVCache();
+        _decoder.clearExternalKVContext();
+        const auto &prompt = _packed_prompts[i];
+        if (prompt.empty()) {
+            tensorDestroy(single_logits);
+            clearPackedState();
+            return false;
+        }
+        if (!_decoder.prefill(prompt.data(), prompt.size(), single_logits)) {
+            tensorDestroy(single_logits);
+            clearPackedState();
+            return false;
+        }
+        auto *ctx = ::llaisysQwen2KVContextCreate(
+            _meta.dtype,
+            _device,
+            device_id,
+            _meta.nlayer,
+            _meta.nh,
+            _meta.nkvh,
+            _meta.dh);
+        if (!ctx) {
+            tensorDestroy(single_logits);
+            clearPackedState();
+            return false;
+        }
+        if (_decoder.exportKVContext(ctx, kPackedBlockTokens) != 0) {
+            ::llaisysQwen2KVContextRelease(ctx);
+            tensorDestroy(single_logits);
+            clearPackedState();
+            return false;
+        }
+        _packed_kv_contexts[i] = ctx;
+    }
+    _decoder.clearExternalKVContext();
+    _decoder.resetKVCache();
+    tensorDestroy(single_logits);
+    return true;
+}
+
+bool Qwen2::stepPacked(const int64_t *token_ids,
+                       size_t ntoken,
+                       const int64_t *token_offsets,
+                       size_t nseq,
+                       int64_t *out_next_tokens) {
+    if (!token_ids || !token_offsets || nseq == 0 || !out_next_tokens) return false;
+    if (token_offsets[0] != 0 || static_cast<size_t>(token_offsets[nseq]) != ntoken) return false;
+    for (size_t i = 0; i < nseq; ++i) {
+        if (token_offsets[i] >= token_offsets[i + 1]) return false;
+    }
+    if (_packed_prompts.size() != nseq || _packed_kv_contexts.size() != nseq) return false;
+
+    const int device_id = _device_ids.empty() ? 0 : _device_ids[0];
+    constexpr size_t kPackedBlockTokens = 64;
+    std::vector<int64_t> step_tokens(nseq, 0);
+    for (size_t i = 0; i < nseq; ++i) {
+        const size_t begin = static_cast<size_t>(token_offsets[i]);
+        const size_t end = static_cast<size_t>(token_offsets[i + 1]);
+        const size_t step_len = end - begin;
+        if (step_len != 1) return false;
+        step_tokens[i] = token_ids[begin];
+    }
+    std::vector<LlaisysQwen2KVContext *> contexts(nseq, nullptr);
+    for (size_t i = 0; i < nseq; ++i) {
+        contexts[i] = _packed_kv_contexts[i];
+        if (!contexts[i]) return false;
+    }
+
+    size_t logits_shape[2] = {nseq, _meta.voc};
+    llaisysTensor_t logits = tensorCreate(logits_shape, 2, _meta.dtype, _device, device_id);
+    if (!logits) return false;
+    if (!_decoder.decodePacked(step_tokens.data(), nseq, contexts, logits, kPackedBlockTokens)) {
+        tensorDestroy(logits);
+        clearPackedState();
+        return false;
+    }
+    for (size_t i = 0; i < nseq; ++i) {
+        llaisysTensor_t row = tensorSlice(logits, 0, i, i + 1);
+        if (!row) {
+            tensorDestroy(logits);
+            clearPackedState();
+            return false;
+        }
+        out_next_tokens[i] = argmax_from_logits(row, _meta.dtype, _device, device_id);
+        tensorDestroy(row);
+        if (out_next_tokens[i] < 0) {
+            tensorDestroy(logits);
+            clearPackedState();
+            return false;
+        }
+        _packed_prompts[i].push_back(step_tokens[i]);
+        _packed_prompts[i].push_back(out_next_tokens[i]);
+    }
+    tensorDestroy(logits);
+    return true;
+}
+
 int64_t Qwen2::prefillSampling(const int64_t *token_ids, size_t ntoken, const LlaisysSamplingParams *params) {
     if (!token_ids || ntoken == 0) return -1;
+    clearPackedState();
 
     const int device_id = _device_ids.empty() ? 0 : _device_ids[0];
     size_t logits_shape[2] = {1, _meta.voc};
@@ -301,6 +478,7 @@ int64_t Qwen2::prefillSampling(const int64_t *token_ids, size_t ntoken, const Ll
 
 int64_t Qwen2::stepSampling(const int64_t *token_ids, size_t ntoken, const LlaisysSamplingParams *params) {
     if (!token_ids || ntoken == 0) return -1;
+    clearPackedState();
 
     const int device_id = _device_ids.empty() ? 0 : _device_ids[0];
     size_t logits_shape[2] = {1, _meta.voc};

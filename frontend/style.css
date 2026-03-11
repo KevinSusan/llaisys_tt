@@ -115,16 +115,74 @@ body {
   background: #1f6feb;
   color: white;
   align-self: flex-end;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.user-content {
+  white-space: pre-wrap;
+}
+
+.bubble-edit {
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  flex: 0 0 auto;
 }
 
 .bubble.assistant {
   background: #222836;
+  padding: 8px 10px;
+}
+
+.assistant-thinking {
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border-left: 3px solid #6b7280;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.assistant-thinking-label {
+  font-size: 12px;
+  color: #a7b0bf;
+  margin-bottom: 4px;
+}
+
+.assistant-thinking-content {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #c9d1dd;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.assistant-answer {
+  font-size: 18px;
+  line-height: 1.55;
+  color: #f2f5fb;
+  white-space: pre-wrap;
 }
 
 .composer {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.edit-hint {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #375a8f;
+  background: #18263d;
+  color: #cfe3ff;
+  font-size: 13px;
 }
 
 textarea {
@@ -142,6 +200,12 @@ textarea {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .controls {
@@ -174,4 +238,8 @@ button {
 button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+button.secondary {
+  background: #3a4456;
 }

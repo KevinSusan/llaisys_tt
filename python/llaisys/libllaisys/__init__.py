@@ -13,7 +13,15 @@ from .tensor import llaisysTensor_t
 from .tensor import load_tensor
 from .ops import load_ops
 from .models import load_models
-from .models import LlaisysQwen2Meta, LlaisysQwen2Weights, LlaisysQwen2Model, LlaisysSamplingParams
+from .models import (
+    LlaisysQwen2Meta,
+    LlaisysQwen2Weights,
+    LlaisysQwen2Model,
+    LlaisysSamplingParams,
+    LlaisysQwen2KVBlockMeta,
+    LlaisysQwen2KVBlock,
+    LlaisysQwen2KVContext,
+)
 from .tokenizer import load_tokenizer, LlaisysTokenizer
 
 
@@ -61,5 +69,8 @@ __all__ = [
     "LlaisysQwen2Weights",
     "LlaisysQwen2Model",
     "LlaisysSamplingParams",
+    "LlaisysQwen2KVBlockMeta",
+    "LlaisysQwen2KVBlock",
+    "LlaisysQwen2KVContext",
     "LlaisysTokenizer",
 ]

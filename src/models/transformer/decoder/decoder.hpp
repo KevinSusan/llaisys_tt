@@ -33,18 +33,37 @@ public:
 
     // Prefill with a full sequence, returns last-step logits.
     bool prefill(const int64_t *token_ids, size_t ntoken, llaisysTensor_t out_last_logits);
+    // Prefill packed independent sequences, outputs one logits row per sequence.
+    bool prefillPacked(const int64_t *token_ids,
+                       size_t ntoken,
+                       const int64_t *token_offsets,
+                       size_t nseq,
+                       llaisysTensor_t out_last_logits);
 
     // Decode with only new tokens (append-only), returns last-step logits.
     bool decodeStep(const int64_t *token_ids, size_t ntoken, llaisysTensor_t out_last_logits);
+    // Decode one token per sequence in a packed batch with per-sequence KV contexts.
+    bool decodePacked(const int64_t *token_ids,
+                      size_t nseq,
+                      const std::vector<LlaisysQwen2KVContext *> &contexts,
+                      llaisysTensor_t out_last_logits,
+                      size_t block_tokens_hint);
 
     void resetKVCache();
 
     void setKVCacheEnabled(bool enabled);
+    void bindExternalKVContext(void *ctx, size_t past_len_tokens);
+    void clearExternalKVContext();
+    bool hasExternalKVContext() const;
+    int exportKVContext(void *ctx, size_t block_tokens);
 
 private:
+    bool recoverExternalCache();
     bool runHidden(const int64_t *token_ids,
                    size_t ntoken,
                    bool append_only,
+                   const int64_t *segment_offsets,
+                   size_t nseg,
                    size_t &past_len,
                    size_t &cur_len,
                    llaisysTensor_t &idx,
@@ -62,6 +81,9 @@ private:
     size_t _past_len{0};
     bool _cache_inited{false};
     bool _kv_cache_enabled{true};
+    void *_external_kv_ctx{nullptr};
+    size_t _external_past_len{0};
+    bool _external_cache_ready{false};
 };
 
 } // namespace llaisys::models::transformer

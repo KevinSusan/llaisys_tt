@@ -45,6 +45,15 @@ __C {
 
     //千问2模型
     struct LlaisysQwen2Model;
+    // KV block / context (experimental)
+    struct LlaisysQwen2KVBlock;
+    struct LlaisysQwen2KVContext;
+
+    struct LlaisysQwen2KVBlockMeta {
+        llaisysDataType_t dtype;
+        size_t nlayer, nh, nkvh, dh;
+        size_t max_tokens;
+    };
 
     //创建千问2模型实例
     __export struct LlaisysQwen2Model *llaisysQwen2ModelCreate(const LlaisysQwen2Meta *meta, llaisysDeviceType_t device, int *device_ids, int ndevice);
@@ -63,6 +72,21 @@ __C {
 
     //执行千问2模型单步解码（step）
     __export int64_t llaisysQwen2ModelStep(struct LlaisysQwen2Model * model, int64_t * token_ids, size_t ntoken);
+
+    //执行千问2模型批量预填充（packed prompts）
+    // token_offsets 长度为 nseq + 1，且 token_offsets[0]=0, token_offsets[nseq]=ntoken
+    // out_next_tokens 需为长度 nseq 的可写缓冲区
+    __export int32_t llaisysQwen2ModelPrefillPacked(struct LlaisysQwen2Model *model,
+                                                    int64_t *token_ids,
+                                                    const int64_t *token_offsets,
+                                                    size_t nseq,
+                                                    int64_t *out_next_tokens);
+    //执行千问2模型批量解码（packed，当前为过渡语义，详见实现注释）
+    __export int32_t llaisysQwen2ModelStepPacked(struct LlaisysQwen2Model *model,
+                                                 int64_t *token_ids,
+                                                 const int64_t *token_offsets,
+                                                 size_t nseq,
+                                                 int64_t *out_next_tokens);
 
     //执行千问2模型预填充（prefill，带采样参数）
     __export int64_t llaisysQwen2ModelPrefillSampling(struct LlaisysQwen2Model * model,
@@ -96,5 +120,44 @@ __C {
 
     //启用/禁用 KV-cache
     __export void llaisysQwen2ModelSetKVCacheEnabled(struct LlaisysQwen2Model * model, uint8_t enabled);
+
+    // ===== Experimental KV block/context APIs =====
+    __export struct LlaisysQwen2KVBlock *llaisysQwen2KVBlockCreate(
+        const struct LlaisysQwen2KVBlockMeta *meta,
+        llaisysDeviceType_t device,
+        int device_id);
+    __export void llaisysQwen2KVBlockRetain(struct LlaisysQwen2KVBlock *block);
+    __export void llaisysQwen2KVBlockRelease(struct LlaisysQwen2KVBlock *block);
+    __export int32_t llaisysQwen2KVBlockSetTokenCount(struct LlaisysQwen2KVBlock *block, size_t used_tokens);
+    __export size_t llaisysQwen2KVBlockTokenCount(const struct LlaisysQwen2KVBlock *block);
+    __export llaisysTensor_t llaisysQwen2KVBlockKeyTensor(struct LlaisysQwen2KVBlock *block, size_t layer);
+    __export llaisysTensor_t llaisysQwen2KVBlockValueTensor(struct LlaisysQwen2KVBlock *block, size_t layer);
+
+    __export struct LlaisysQwen2KVContext *llaisysQwen2KVContextCreate(
+        llaisysDataType_t dtype,
+        llaisysDeviceType_t device,
+        int device_id,
+        size_t nlayer,
+        size_t nh,
+        size_t nkvh,
+        size_t dh);
+    __export void llaisysQwen2KVContextRetain(struct LlaisysQwen2KVContext *ctx);
+    __export void llaisysQwen2KVContextRelease(struct LlaisysQwen2KVContext *ctx);
+    __export int32_t llaisysQwen2KVContextAttachBlock(
+        struct LlaisysQwen2KVContext *ctx,
+        struct LlaisysQwen2KVBlock *block);
+    __export void llaisysQwen2KVContextDetachAll(struct LlaisysQwen2KVContext *ctx);
+    __export size_t llaisysQwen2KVContextBlockCount(const struct LlaisysQwen2KVContext *ctx);
+    __export size_t llaisysQwen2KVContextTokenCount(const struct LlaisysQwen2KVContext *ctx);
+
+    __export int32_t llaisysQwen2ModelSetKVContext(
+        struct LlaisysQwen2Model *model,
+        struct LlaisysQwen2KVContext *ctx);
+    __export struct LlaisysQwen2KVContext *llaisysQwen2ModelGetKVContext(
+        struct LlaisysQwen2Model *model);
+    __export int32_t llaisysQwen2ModelExportKVContext(
+        struct LlaisysQwen2Model *model,
+        struct LlaisysQwen2KVContext *ctx,
+        size_t block_tokens);
 }
 #endif // LLAISYS_MODELS_QWEN2_H

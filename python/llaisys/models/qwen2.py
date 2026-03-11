@@ -15,6 +15,7 @@ from ..libllaisys import (
     llaisysDataType_t,
     LlaisysQwen2Meta,
     LlaisysSamplingParams,
+    LlaisysQwen2KVBlockMeta,
 )
 
 
@@ -56,6 +57,7 @@ class Qwen2:
 
     def __init__(self, model_path, device: DeviceType = DeviceType.CPU):
         model_path = Path(model_path)
+        self._device = device
 
         # 实例化模型元信息
         config_path = model_path / "config.json"
@@ -76,11 +78,11 @@ class Qwen2:
             dtype = DataType.F16
         else:
             dtype = DataType.BF16
-        # 统一用 torch 读取 bfloat16，并降级为 float16，避免 numpy bfloat16 兼容问题
-        use_torch_loader = False
+        # 统一用 torch 读取，避免 numpy->torch 混合加载路径在 Windows 上触发崩溃
+        # （历史上 safetensors 在该切换路径会触发访问冲突）。
+        use_torch_loader = True
         if dtype == DataType.BF16:
             dtype = DataType.F16
-            use_torch_loader = True
         # 解析模型参数
         nlayer = int(cfg.get("num_hidden_layers", 0))
         hs = int(cfg.get("hidden_size", 0))
@@ -166,21 +168,11 @@ class Qwen2:
 
         # 加载模型权重
         for file in sorted(model_path.glob("*.safetensors")):
-            if use_torch_loader:
-                import torch
-                data_ = safetensors.safe_open(file, framework="pt", device="cpu")
-            else:
-                data_ = safetensors.safe_open(file, framework="numpy", device="cpu")
+            import torch
+            data_ = safetensors.safe_open(file, framework="pt", device="cpu")
             for name_ in data_.keys():
                 ## TODO: load the model weights
-                try:
-                    arr = data_.get_tensor(name_)
-                except TypeError:
-                    # numpy 无法处理 bfloat16 时，回退到 torch
-                    import torch
-                    data_ = safetensors.safe_open(file, framework="pt", device="cpu")
-                    arr = data_.get_tensor(name_)
-                    use_torch_loader = True
+                arr = data_.get_tensor(name_)
                 if use_torch_loader:
                     if arr.dtype == torch.bfloat16:
                         arr = arr.to(torch.float16)
@@ -338,6 +330,64 @@ class Qwen2:
             )
         )
 
+    def prefill_packed(self, sequences: Sequence[Sequence[int]]) -> list[int]:
+        seqs = [list(s) for s in sequences]
+        if not seqs:
+            return []
+        if not hasattr(LIB_LLAISYS, "llaisysQwen2ModelPrefillPacked"):
+            raise RuntimeError("llaisysQwen2ModelPrefillPacked is unavailable in current llaisys.dll")
+        offsets = [0]
+        flat: list[int] = []
+        for s in seqs:
+            if not s:
+                raise ValueError("each packed sequence must be non-empty")
+            flat.extend(int(x) for x in s)
+            offsets.append(len(flat))
+        token_buf = (c_int64 * len(flat))(*flat)
+        off_buf = (c_int64 * len(offsets))(*offsets)
+        out_buf = (c_int64 * len(seqs))()
+        ret = int(
+            LIB_LLAISYS.llaisysQwen2ModelPrefillPacked(
+                self._model,
+                token_buf,
+                off_buf,
+                c_size_t(len(seqs)),
+                out_buf,
+            )
+        )
+        if ret != 0:
+            raise RuntimeError(f"llaisysQwen2ModelPrefillPacked failed with code {ret}")
+        return [int(out_buf[i]) for i in range(len(seqs))]
+
+    def step_packed(self, sequences: Sequence[Sequence[int]]) -> list[int]:
+        seqs = [list(s) for s in sequences]
+        if not seqs:
+            return []
+        if not hasattr(LIB_LLAISYS, "llaisysQwen2ModelStepPacked"):
+            raise RuntimeError("llaisysQwen2ModelStepPacked is unavailable in current llaisys.dll")
+        offsets = [0]
+        flat: list[int] = []
+        for s in seqs:
+            if not s:
+                raise ValueError("each packed sequence must be non-empty")
+            flat.extend(int(x) for x in s)
+            offsets.append(len(flat))
+        token_buf = (c_int64 * len(flat))(*flat)
+        off_buf = (c_int64 * len(offsets))(*offsets)
+        out_buf = (c_int64 * len(seqs))()
+        ret = int(
+            LIB_LLAISYS.llaisysQwen2ModelStepPacked(
+                self._model,
+                token_buf,
+                off_buf,
+                c_size_t(len(seqs)),
+                out_buf,
+            )
+        )
+        if ret != 0:
+            raise RuntimeError(f"llaisysQwen2ModelStepPacked failed with code {ret}")
+        return [int(out_buf[i]) for i in range(len(seqs))]
+
     def prefill_sampling(
         self,
         inputs: Sequence[int],
@@ -398,3 +448,78 @@ class Qwen2:
 
     def reset_kv_cache(self):
         LIB_LLAISYS.llaisysQwen2ModelResetKVCache(self._model)
+
+    # ===== Experimental KV block/context wrappers =====
+    def kv_context_create(self):
+        return LIB_LLAISYS.llaisysQwen2KVContextCreate(
+            llaisysDataType_t(self._meta.dtype),
+            llaisysDeviceType_t(self._device),
+            c_int(0),
+            c_size_t(self._meta.nlayer),
+            c_size_t(self._meta.nh),
+            c_size_t(self._meta.nkvh),
+            c_size_t(self._meta.dh),
+        )
+
+    def kv_context_release(self, ctx):
+        LIB_LLAISYS.llaisysQwen2KVContextRelease(ctx)
+
+    def kv_context_attach_block(self, ctx, block):
+        return int(LIB_LLAISYS.llaisysQwen2KVContextAttachBlock(ctx, block))
+
+    def kv_context_detach_all(self, ctx):
+        LIB_LLAISYS.llaisysQwen2KVContextDetachAll(ctx)
+
+    def kv_context_block_count(self, ctx) -> int:
+        return int(LIB_LLAISYS.llaisysQwen2KVContextBlockCount(ctx))
+
+    def kv_context_token_count(self, ctx) -> int:
+        return int(LIB_LLAISYS.llaisysQwen2KVContextTokenCount(ctx))
+
+    def kv_block_create(self, max_tokens: int):
+        meta = LlaisysQwen2KVBlockMeta(
+            llaisysDataType_t(self._meta.dtype),
+            c_size_t(self._meta.nlayer),
+            c_size_t(self._meta.nh),
+            c_size_t(self._meta.nkvh),
+            c_size_t(self._meta.dh),
+            c_size_t(max_tokens),
+        )
+        return LIB_LLAISYS.llaisysQwen2KVBlockCreate(
+            byref(meta),
+            llaisysDeviceType_t(self._device),
+            c_int(0),
+        )
+
+    def kv_block_retain(self, block):
+        LIB_LLAISYS.llaisysQwen2KVBlockRetain(block)
+
+    def kv_block_release(self, block):
+        LIB_LLAISYS.llaisysQwen2KVBlockRelease(block)
+
+    def kv_block_token_count(self, block) -> int:
+        return int(LIB_LLAISYS.llaisysQwen2KVBlockTokenCount(block))
+
+    def kv_block_set_token_count(self, block, used_tokens: int) -> int:
+        return int(LIB_LLAISYS.llaisysQwen2KVBlockSetTokenCount(block, c_size_t(int(used_tokens))))
+
+    def kv_block_key_tensor(self, block, layer: int):
+        return LIB_LLAISYS.llaisysQwen2KVBlockKeyTensor(block, c_size_t(int(layer)))
+
+    def kv_block_value_tensor(self, block, layer: int):
+        return LIB_LLAISYS.llaisysQwen2KVBlockValueTensor(block, c_size_t(int(layer)))
+
+    def set_kv_context(self, ctx) -> int:
+        return int(LIB_LLAISYS.llaisysQwen2ModelSetKVContext(self._model, ctx))
+
+    def get_kv_context(self):
+        return LIB_LLAISYS.llaisysQwen2ModelGetKVContext(self._model)
+
+    def export_kv_context(self, ctx, block_tokens: int) -> int:
+        return int(
+            LIB_LLAISYS.llaisysQwen2ModelExportKVContext(
+                self._model,
+                ctx,
+                c_size_t(int(block_tokens)),
+            )
+        )

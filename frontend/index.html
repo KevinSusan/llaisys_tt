@@ -29,6 +29,7 @@
         <section id="chat" class="chat"></section>
 
         <form id="chat-form" class="composer">
+          <div id="edit-hint" class="edit-hint" style="display:none"></div>
           <textarea id="prompt" rows="3" placeholder="输入问题..."></textarea>
           <div class="actions">
             <div class="controls">
@@ -61,7 +62,10 @@
                 <input id="seed" type="number" min="0" value="0" />
               </label>
             </div>
-            <button id="send" type="submit">发送</button>
+            <div class="action-buttons">
+              <button id="stop" type="button" class="secondary" disabled>停止</button>
+              <button id="send" type="submit">发送</button>
+            </div>
           </div>
         </form>
       </section>
