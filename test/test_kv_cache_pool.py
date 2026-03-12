@@ -5,8 +5,17 @@ import sys
 
 def _load_pool_module():
     root = Path(__file__).resolve().parents[1]
+
+    # Load interfaces first (kv_cache_pool imports from it)
+    iface_path = root / "python" / "llaisys" / "interfaces.py"
+    iface_spec = importlib.util.spec_from_file_location("llaisys.interfaces", str(iface_path))
+    if iface_spec is not None and iface_spec.loader is not None:
+        iface_mod = importlib.util.module_from_spec(iface_spec)
+        sys.modules[iface_spec.name] = iface_mod
+        iface_spec.loader.exec_module(iface_mod)
+
     module_path = root / "python" / "llaisys" / "kv_cache_pool.py"
-    spec = importlib.util.spec_from_file_location("kv_cache_pool", str(module_path))
+    spec = importlib.util.spec_from_file_location("llaisys.kv_cache_pool", str(module_path))
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to load kv_cache_pool module")
     module = importlib.util.module_from_spec(spec)

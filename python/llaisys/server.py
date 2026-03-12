@@ -11,12 +11,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import llaisys
+from llaisys.interfaces import IInferenceService
 from llaisys.kv_cache_pool import KVCachePool
 from llaisys.models import Qwen2
 from llaisys.scheduler import InferenceScheduler, SchedulerQueueFullError, TaskTimeoutError
 
 
-class ChatService:
+class ChatService(IInferenceService):
     def __init__(
         self,
         model: Qwen2,
@@ -57,6 +58,47 @@ class ChatService:
                 re.IGNORECASE,
             ),
         ]
+
+    @property
+    def kv_pool(self) -> KVCachePool:
+        """暴露 KVCache 池给调度器查询"""
+        return self._kv_pool
+
+    def tokenize_for_routing(self, payload: Dict[str, Any]) -> Optional[List[int]]:
+        """为 KV 感知路由进行轻量级 tokenize
+
+        尝试从 payload 构建 prompt 并 tokenize，用于调度器查询 KV 命中。
+        失败时返回 None，不影响正常请求处理。
+
+        Args:
+            payload: 请求参数
+
+        Returns:
+            token ids 列表，或 None（如果无法 tokenize）
+        """
+        try:
+            # 尝试提取 messages
+            messages = payload.get("messages")
+            prompt_text = payload.get("prompt")
+            system_prompt = payload.get("system_prompt")
+
+            if messages is not None:
+                if not isinstance(messages, list):
+                    return None
+                prompt = self._render_prompt(list(messages), str(system_prompt) if system_prompt else None)
+            elif prompt_text is not None:
+                # 简单 prompt，尝试获取历史
+                session_id = str(payload.get("session_id") or "").strip()
+                with self._context_lock:
+                    history = list(self._context_messages.get(session_id, []))
+                history.append({"role": "user", "content": str(prompt_text)})
+                prompt = self._render_prompt(history, str(system_prompt) if system_prompt else None)
+            else:
+                return None
+
+            return self.tokenizer.encode(prompt)
+        except Exception:
+            return None
 
     @staticmethod
     def _init_chat_template_tokenizer(model_path: Optional[str]):
@@ -794,6 +836,11 @@ def main() -> None:
         action="store_true",
         help="enable minimal iteration-level continuous scheduling",
     )
+    parser.add_argument(
+        "--kv-aware-routing",
+        action="store_true",
+        help="enable KV-aware worker routing (query KV pool before dispatching)",
+    )
     args = parser.parse_args()
 
     tokenizer_path = _resolve_tokenizer_path(args.model, args.tokenizer)
@@ -821,6 +868,7 @@ def main() -> None:
         queue_size=max(1, int(args.queue_size)),
         request_timeout_ms=max(0, int(args.request_timeout_ms)),
         continuous_batching=bool(args.continuous_batching),
+        kv_aware_routing=bool(args.kv_aware_routing),
     )
     scheduler.start()
 
@@ -828,9 +876,10 @@ def main() -> None:
     handler.scheduler = scheduler
     server = ThreadingHTTPServer((args.host, args.port), handler)
     server.daemon_threads = True
+    kv_routing_str = ", kv_aware_routing=on" if args.kv_aware_routing else ""
     print(
         f"LLAISYS chat server listening on http://{args.host}:{args.port} "
-        f"(workers={worker_count}, queue_size={max(1, int(args.queue_size))})"
+        f"(workers={worker_count}, queue_size={max(1, int(args.queue_size))}{kv_routing_str})"
     )
     try:
         server.serve_forever()

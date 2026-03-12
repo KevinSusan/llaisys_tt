@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from llaisys.interfaces import IKVCachePool
+
 
 @dataclass
 class KVBlock:
@@ -36,7 +38,7 @@ class AcquireResult:
     prefix_len: int
 
 
-class KVCachePool:
+class KVCachePool(IKVCachePool):
     """In-memory token-block cache pool with reference counting.
 
     Notes:
@@ -52,7 +54,7 @@ class KVCachePool:
     ) -> None:
         if block_size <= 0:
             raise ValueError("block_size must be > 0")
-        self.block_size = int(block_size)
+        self._block_size = int(block_size)
         self.max_blocks = int(max_blocks)
         self.max_bytes = int(max_bytes)
 
@@ -66,6 +68,10 @@ class KVCachePool:
         self._acquire_count = 0
         self._prefix_hit_count = 0
         self._matched_tokens_total = 0
+
+    @property
+    def block_size(self) -> int:
+        return self._block_size
 
     def acquire_context(self, context_id: str, tokens: Sequence[int]) -> AcquireResult:
         """Bind context to current prompt tokens.
@@ -282,6 +288,23 @@ class KVCachePool:
                 "prefix_hit_rate": hit_rate,
                 "avg_matched_tokens": avg_matched_tokens,
             }
+
+    def query_prefix_len(self, tokens: Sequence[int]) -> int:
+        """查询前缀命中长度（只读，不修改状态）
+
+        调度器可以用此方法查询某个 token 序列在当前池中的命中情况，
+        用于做 KV 感知的路由决策。
+
+        Args:
+            tokens: 待查询的 token 序列
+
+        Returns:
+            命中的前缀长度（token 数量），0 表示无命中
+        """
+        token_tuple = tuple(int(t) for t in tokens)
+        with self._lock:
+            _, matched_len = self._find_longest_sealed_prefix(token_tuple)
+            return matched_len
 
     def debug_context(self, context_id: str) -> Optional[Dict[str, object]]:
         """Return context chain snapshot for tests and diagnostics."""

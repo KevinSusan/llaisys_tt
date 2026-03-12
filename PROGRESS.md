@@ -404,6 +404,81 @@
   - （√）`--workers 1 --queue-size 128 --request-timeout-ms 120000 --continuous-batching`
   - （√）`--kv-runtime-reuse` 继续维持灰度开关，不默认强开。
 
+### 2026-03-12（接口抽象与 KV 感知路由）
+
+- **架构重构：接口抽象**
+  - （√）新增 `python/llaisys/interfaces.py`，定义 `IKVCachePool` 和 `IInferenceService` 接口。
+  - （√）`KVCachePool` 新增 `query_prefix_len()` 方法：只读查询前缀命中长度，不修改状态。
+  - （√）`ChatService` 新增 `kv_pool` 属性：暴露 KVCache 池给调度器查询。
+  - （√）`InferenceScheduler` 添加类型标注，依赖接口而非具体实现。
+
+- **功能实现：KV 感知路由**
+  - （√）新增 `--kv-aware-routing` 命令行参数（默认关闭）。
+  - （√）`_choose_worker()` 支持 KV 感知路由：查询各 worker 的 KV 命中情况，选择命中最多的 worker。
+  - （√）路由优先级：会话粘性 > KV 感知 > hash/轮询。
+  - （√）新增调度指标：`kv_aware_routing_attempts`、`kv_aware_routing_hits`、`kv_aware_routing_best_prefix_len_sum`。
+  - （√）`/debug/scheduler` 新增字段：`kv_aware_routing`、`kv_routing_hit_rate`、`kv_routing_avg_prefix_len`。
+
+- **文档更新**
+  - （√）新增 `docs/ARCHITECTURE_ANALYSIS.md`：架构对比分析文档。
+
+- **使用方式**
+  ```bash
+  # 启用 KV 感知路由（需要 workers > 1）
+  python -m llaisys.server --model "模型目录" --workers 2 --kv-aware-routing
+  ```
+
+- **自动 Tokenize 支持**
+  - （√）`ChatService` 新增 `tokenize_for_routing()` 方法：轻量级构建 prompt 并 tokenize。
+  - （√）`IInferenceService` 接口新增 `tokenize_for_routing()` 可选方法。
+  - （√）`InferenceScheduler.submit()` 自动调用 tokenize：当启用 KV 感知路由且 payload 无 `_prompt_tokens` 时，自动尝试 tokenize。
+  - （√）失败时静默回退到普通路由，不影响正常请求处理。
+
+- **当前限制与后续方向**
+  - （√）KV 感知路由现已支持自动 tokenize，无需请求手动携带 `_prompt_tokens`。
+  - （？）多 worker 仍为模型副本模式，内存占用线性增长。
+  - （？）后续可考虑：共享 KVCache 池、KV 感知组批、内存感知流控。
+
+### 2026-03-13（代码审查与质量修复）
+
+- **代码审查（reviewer 主导）**
+  - （√）完成 `interfaces.py`、`kv_cache_pool.py`、`scheduler.py`、`server.py` 详细审查。
+  - （√）发现 6 个问题，按风险等级分类并输出审查报告。
+
+- **Fix #1：`_session_worker` 无限增长（scheduler.py）**
+  - （√）`_session_worker` 从 `dict` 替换为 `OrderedDict`，引入 LRU 淘汰。
+  - （√）新增 `_touch_session()` 方法，统一封装写入 + 淘汰逻辑。
+  - （√）新增 `max_sticky_sessions` 构造参数（默认 10000，下限 100）。
+  - （√）`debug_snapshot()` 新增 `sticky_sessions` 字段。
+
+- **Fix #2：KV 路由 TOCTOU 竞态（scheduler.py）**
+  - （√）不修复，添加 best-effort 注释说明 KV 感知路由是尽力近似策略。
+
+- **Fix #3：异常过度吞没 + payload 污染（scheduler.py）**
+  - （√）`submit()` 入口统一浅拷贝 `payload = dict(payload)`，保护调用方原始 dict。
+  - （√）新增 `import logging` 和 `logger`，异常时 `logger.debug(exc_info=True)` 记录。
+
+- **Fix #4：接口未被实际继承（kv_cache_pool.py, server.py）**
+  - （√）`KVCachePool` 显式继承 `IKVCachePool`，`ChatService` 显式继承 `IInferenceService`。
+  - （√）`block_size` 从公有实例属性改为 `self._block_size` + `@property`，满足 ABC 约束。
+
+- **Fix #5：`request_stop` 两次加锁（scheduler.py）**
+  - （√）合并为单次 `with self._lock`，减少锁开销。
+
+- **Fix #6：`_prompt_tokens` 泄漏到下游（scheduler.py）**
+  - （√）路由决策完成后 `payload.pop("_prompt_tokens", None)`，避免内部字段传递到 worker。
+
+- **测试（qa 主导）**
+  - （√）新增 `test/test_fixes.py`：19 个测试用例，覆盖全部 6 个修复点。
+  - （√）既有测试套件全部通过：`test_kv_cache_pool.py`、`test_scheduler_inmemory.py`、`test_server_kv_reuse_integration.py`。
+  - （√）修复既有测试中因 Fix #4 引入运行时 `interfaces` 导入的兼容问题。
+
+- **设计文档**
+  - （√）新增 `docs/FIX_DESIGN.md`：6 个问题的完整修复设计方案。
+
+- **团队协作流程**
+  - （√）使用 5 人 agent team（lead / architect / backend / qa / reviewer）完成完整开发流程。
+  - （√）流程：审查报告 → 设计方案 → 代码实现 → 测试验证 → 最终审查 → 批准合入。
 
 ---
 

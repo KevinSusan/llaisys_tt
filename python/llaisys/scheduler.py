@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import queue
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-from collections import deque
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections import OrderedDict, deque
 
+if TYPE_CHECKING:
+    from llaisys.interfaces import IInferenceService
+
+logger = logging.getLogger(__name__)
 
 _END = object()
 
@@ -69,24 +74,28 @@ class InferenceScheduler:
 
     def __init__(
         self,
-        services: List[Any],
+        services: "List[IInferenceService]",
         queue_size: int = 128,
         request_timeout_ms: int = 120000,
         continuous_batching: bool = False,
+        kv_aware_routing: bool = False,
+        max_sticky_sessions: int = 10000,
     ) -> None:
         if not services:
             raise ValueError("services must not be empty")
-        self._services = list(services)
+        self._services: "List[IInferenceService]" = list(services)
         self._queue_size = max(1, int(queue_size))
         self._request_timeout_ms = max(0, int(request_timeout_ms))
         self._continuous_batching = bool(continuous_batching)
+        self._kv_aware_routing = bool(kv_aware_routing)
+        self._max_sticky_sessions = max(100, int(max_sticky_sessions))
         self._queues: List["queue.Queue[Optional[InferenceTask]]"] = [
             queue.Queue(maxsize=self._queue_size) for _ in self._services
         ]
         self._threads: List[threading.Thread] = []
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._session_worker: Dict[str, int] = {}
+        self._session_worker: "OrderedDict[str, int]" = OrderedDict()
         self._rr = 0
         self._packed_prefill_last_error: str = ""
         self._metrics: Dict[str, float] = {
@@ -110,6 +119,10 @@ class InferenceScheduler:
             "packed_prefill_candidate_tasks": 0.0,
             "packed_prefill_none_returns": 0.0,
             "packed_prefill_exceptions": 0.0,
+            # KV 感知路由指标
+            "kv_aware_routing_attempts": 0.0,
+            "kv_aware_routing_hits": 0.0,
+            "kv_aware_routing_best_prefix_len_sum": 0.0,
         }
 
     def start(self) -> None:
@@ -133,12 +146,34 @@ class InferenceScheduler:
         self._threads.clear()
 
     def submit(self, payload: Dict[str, Any], stream: bool) -> TaskHandle:
+        payload = dict(payload)  # shallow copy to avoid mutating caller's dict
+
+        # 自动 tokenize：如果启用了 KV 感知路由且 payload 中没有 _prompt_tokens
+        if (
+            self._kv_aware_routing
+            and "_prompt_tokens" not in payload
+            and len(self._services) > 1
+        ):
+            try:
+                # 使用第一个服务进行 tokenize（所有服务使用相同的 tokenizer）
+                svc = self._services[0]
+                if hasattr(svc, "tokenize_for_routing"):
+                    tokens = svc.tokenize_for_routing(payload)
+                    if tokens:
+                        payload["_prompt_tokens"] = tokens
+            except Exception:
+                logger.debug("tokenize_for_routing failed, falling back to default routing", exc_info=True)
+
         worker_idx = self._choose_worker(payload)
+
+        # 清理路由专用的内部字段，不传递给下游
+        payload.pop("_prompt_tokens", None)
+
         out_q: "queue.Queue[Any]" = queue.Queue()
         deadline_at: Optional[float] = None
         if self._request_timeout_ms > 0:
             deadline_at = time.time() + self._request_timeout_ms / 1000.0
-        task = InferenceTask(payload=dict(payload), stream=bool(stream), output_queue=out_q, deadline_at=deadline_at)
+        task = InferenceTask(payload=payload, stream=bool(stream), output_queue=out_q, deadline_at=deadline_at)
         try:
             self._queues[worker_idx].put_nowait(task)
         except queue.Full:
@@ -155,7 +190,6 @@ class InferenceScheduler:
             return False
         with self._lock:
             self._metrics["stop_requests"] += 1.0
-        with self._lock:
             idx = self._session_worker.get(sid)
         if idx is not None:
             return bool(self._services[idx].request_stop(sid))
@@ -220,9 +254,21 @@ class InferenceScheduler:
         with self._lock:
             metrics = dict(self._metrics)
             packed_prefill_last_error = self._packed_prefill_last_error
+            sticky_sessions = len(self._session_worker)
         avg_batch_active = (
             metrics.get("batch_active_sum", 0.0) / metrics.get("batch_rounds", 1.0)
             if metrics.get("batch_rounds", 0.0) > 0
+            else 0.0
+        )
+        kv_routing_attempts = metrics.get("kv_aware_routing_attempts", 0.0)
+        kv_routing_hit_rate = (
+            metrics.get("kv_aware_routing_hits", 0.0) / kv_routing_attempts
+            if kv_routing_attempts > 0
+            else 0.0
+        )
+        kv_routing_avg_prefix_len = (
+            metrics.get("kv_aware_routing_best_prefix_len_sum", 0.0) / metrics.get("kv_aware_routing_hits", 1.0)
+            if metrics.get("kv_aware_routing_hits", 0.0) > 0
             else 0.0
         )
         return {
@@ -231,7 +277,11 @@ class InferenceScheduler:
             "queues": [q.qsize() for q in self._queues],
             "request_timeout_ms": self._request_timeout_ms,
             "continuous_batching": self._continuous_batching,
+            "kv_aware_routing": self._kv_aware_routing,
+            "kv_routing_hit_rate": kv_routing_hit_rate,
+            "kv_routing_avg_prefix_len": kv_routing_avg_prefix_len,
             "avg_batch_active": avg_batch_active,
+            "sticky_sessions": sticky_sessions,
             "packed_prefill_last_error": packed_prefill_last_error,
             "metrics": metrics,
         }
@@ -241,14 +291,61 @@ class InferenceScheduler:
             return None
         return self._request_timeout_ms / 1000.0
 
+    def _touch_session(self, sid: str, worker_idx: int) -> None:
+        """Record/update session->worker mapping with LRU eviction. Caller must hold self._lock."""
+        if sid in self._session_worker:
+            self._session_worker.move_to_end(sid)
+        self._session_worker[sid] = worker_idx
+        while len(self._session_worker) > self._max_sticky_sessions:
+            self._session_worker.popitem(last=False)
+
     def _choose_worker(self, payload: Dict[str, Any]) -> int:
         sid = str(payload.get("session_id") or payload.get("edit_from_session_id") or "").strip()
+
+        # 1. 会话粘性：已绑定的 session 优先路由到原 worker
         with self._lock:
             if sid and sid in self._session_worker:
+                self._session_worker.move_to_end(sid)
                 return self._session_worker[sid]
+
+        # 2. KV 感知路由：查询各 worker 的 KV 命中情况
+        # KV 感知路由是 best-effort：查询到入队之间 KV 状态可能变化，
+        # 最坏情况是路由到非最优 worker，不影响正确性。
+        prompt_tokens: Optional[Sequence[int]] = payload.get("_prompt_tokens")
+        if self._kv_aware_routing and prompt_tokens and len(self._services) > 1:
+            best_worker = -1
+            best_prefix_len = -1
+
+            for idx, svc in enumerate(self._services):
+                try:
+                    kv_pool = getattr(svc, "kv_pool", None)
+                    if kv_pool is None:
+                        continue
+                    prefix_len = kv_pool.query_prefix_len(prompt_tokens)
+                    if prefix_len > best_prefix_len:
+                        best_prefix_len = prefix_len
+                        best_worker = idx
+                except Exception:
+                    # 查询失败，跳过该 worker
+                    continue
+
+            with self._lock:
+                self._metrics["kv_aware_routing_attempts"] += 1.0
+                if best_prefix_len > 0:
+                    self._metrics["kv_aware_routing_hits"] += 1.0
+                    self._metrics["kv_aware_routing_best_prefix_len_sum"] += float(best_prefix_len)
+
+            if best_worker >= 0 and best_prefix_len > 0:
+                if sid:
+                    with self._lock:
+                        self._touch_session(sid, best_worker)
+                return best_worker
+
+        # 3. Fallback：hash 或轮询
+        with self._lock:
             if sid:
                 idx = hash(sid) % len(self._services)
-                self._session_worker[sid] = idx
+                self._touch_session(sid, idx)
                 return idx
             idx = self._rr % len(self._services)
             self._rr = (self._rr + 1) % len(self._services)
@@ -259,7 +356,7 @@ class InferenceScheduler:
         if not sid:
             return
         with self._lock:
-            self._session_worker[sid] = worker_idx
+            self._touch_session(sid, worker_idx)
 
     def _worker_loop(self, idx: int) -> None:
         if self._continuous_batching:

@@ -6,9 +6,17 @@ from pathlib import Path
 
 def _load_server_module():
     root = Path(__file__).resolve().parents[1]
+    interfaces_path = root / "python" / "llaisys" / "interfaces.py"
     kv_path = root / "python" / "llaisys" / "kv_cache_pool.py"
     scheduler_path = root / "python" / "llaisys" / "scheduler.py"
     server_path = root / "python" / "llaisys" / "server.py"
+
+    # Load interfaces first (kv_cache_pool and server import from it)
+    iface_spec = importlib.util.spec_from_file_location("llaisys.interfaces", str(interfaces_path))
+    if iface_spec is not None and iface_spec.loader is not None:
+        iface_mod = importlib.util.module_from_spec(iface_spec)
+        sys.modules[iface_spec.name] = iface_mod
+        iface_spec.loader.exec_module(iface_mod)
 
     kv_spec = importlib.util.spec_from_file_location("llaisys.kv_cache_pool", str(kv_path))
     if kv_spec is None or kv_spec.loader is None:
