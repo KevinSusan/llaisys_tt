@@ -4,7 +4,6 @@ import argparse
 import json
 import re
 import threading
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -13,8 +12,10 @@ from urllib.parse import parse_qs, urlparse
 import llaisys
 from llaisys.interfaces import IInferenceService
 from llaisys.kv_cache_pool import KVCachePool
+from llaisys.kv_runtime_bridge import KVRuntimeBridge
 from llaisys.models import Qwen2
 from llaisys.scheduler import InferenceScheduler, SchedulerQueueFullError, TaskTimeoutError
+from llaisys.session_manager import SessionManager
 
 
 class ChatService(IInferenceService):
@@ -30,24 +31,22 @@ class ChatService(IInferenceService):
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
-        self._model_path = model_path
         self._enable_kv_runtime_reuse = bool(enable_kv_runtime_reuse)
         # RLock allows cooperative iterator-level scheduling in continuous-batching mode.
         self._model_lock = threading.RLock()
-        self._context_lock = threading.Lock()
-        self._context_messages: Dict[str, List[Dict[str, str]]] = {}
-        self._cancel_events: Dict[str, threading.Event] = {}
-        self._native_kv_contexts: Dict[str, Any] = {}
-        self._native_kv_tokens: Dict[str, Tuple[int, ...]] = {}
-        self._last_kv_bind_debug: Dict[str, Dict[str, Any]] = {}
+
+        # Delegated components
+        self._session_mgr = SessionManager()
+        self._kv_bridge = KVRuntimeBridge(model, enabled=enable_kv_runtime_reuse)
         self._kv_pool = KVCachePool(
             block_size=block_size,
             max_blocks=max_blocks,
             max_bytes=max_bytes,
         )
         self._active_tokens: List[int] = []
-        self._chat_template_tokenizer = self._init_chat_template_tokenizer(model_path)
 
+        # Text processing
+        self._chat_template_tokenizer = self._init_chat_template_tokenizer(model_path)
         self._filter_tokens = ("<|end_of_sentence|>",)
         self._filter_patterns = [
             re.compile(r"<\s*\|\s*end_of_sentence\s*\|\s*>", re.IGNORECASE),
@@ -89,8 +88,7 @@ class ChatService(IInferenceService):
             elif prompt_text is not None:
                 # 简单 prompt，尝试获取历史
                 session_id = str(payload.get("session_id") or "").strip()
-                with self._context_lock:
-                    history = list(self._context_messages.get(session_id, []))
+                history = self._session_mgr.get_messages(session_id)
                 history.append({"role": "user", "content": str(prompt_text)})
                 prompt = self._render_prompt(history, str(system_prompt) if system_prompt else None)
             else:
@@ -120,177 +118,13 @@ class ChatService(IInferenceService):
             text = pattern.sub("", text)
         return text
 
-    def _extract_messages(self, payload: Dict[str, Any]) -> Tuple[str, List[Dict[str, str]]]:
-        context_id = str(payload.get("session_id") or "").strip() or str(uuid.uuid4())
-        messages = payload.get("messages")
-        prompt = payload.get("prompt")
-        edit_from = str(payload.get("edit_from_session_id") or "").strip()
-        edit_index_raw = payload.get("edit_message_index")
-
-        # Branch session from history edit:
-        # - edit_from_session_id: source session
-        # - edit_message_index: replace that user message and truncate after it
-        if edit_from:
-            with self._context_lock:
-                source = list(self._context_messages.get(edit_from, []))
-            if not source:
-                raise ValueError("edit_from_session_id not found")
-            if prompt is None:
-                raise ValueError("prompt is required when editing history")
-            if edit_index_raw is None:
-                raise ValueError("edit_message_index is required when editing history")
-            edit_index = int(edit_index_raw)
-            if edit_index < 0 or edit_index >= len(source):
-                raise ValueError("edit_message_index out of range")
-            if source[edit_index].get("role") != "user":
-                raise ValueError("edit_message_index must point to a user message")
-            branched = source[: edit_index + 1]
-            branched[edit_index] = {"role": "user", "content": str(prompt)}
-            # Force new branched session id if caller didn't provide one.
-            if not str(payload.get("session_id") or "").strip():
-                context_id = str(uuid.uuid4())
-            return context_id, branched
-
-        if messages is not None:
-            if not isinstance(messages, list):
-                raise ValueError("messages must be a list")
-            return context_id, list(messages)
-
-        if prompt is None:
-            raise ValueError("payload must include messages or prompt")
-
-        with self._context_lock:
-            history = list(self._context_messages.get(context_id, []))
-        history.append({"role": "user", "content": str(prompt)})
-        return context_id, history
-
-    def _save_context_messages(self, context_id: str, messages: List[Dict[str, str]]) -> None:
-        with self._context_lock:
-            self._context_messages[context_id] = list(messages)
-
-    def _get_cancel_event(self, context_id: str) -> threading.Event:
-        with self._context_lock:
-            event = self._cancel_events.get(context_id)
-            if event is None:
-                event = threading.Event()
-                self._cancel_events[context_id] = event
-            return event
-
     def request_stop(self, context_id: str) -> bool:
-        with self._context_lock:
-            event = self._cancel_events.get(context_id)
-            if event is None:
-                event = threading.Event()
-                self._cancel_events[context_id] = event
-            event.set()
-            return True
-
-    def _clear_stop(self, context_id: str) -> None:
-        with self._context_lock:
-            event = self._cancel_events.get(context_id)
-            if event:
-                event.clear()
-
-    def _release_native_kv_context(self, context_id: str) -> None:
-        with self._context_lock:
-            ctx = self._native_kv_contexts.pop(context_id, None)
-            self._native_kv_tokens.pop(context_id, None)
-            self._last_kv_bind_debug.pop(context_id, None)
-        if ctx:
-            self.model.kv_context_release(ctx)
-
-    def _find_native_kv_context_for_prefix(self, prompt_ids: List[int], prefix_len: int) -> Tuple[Optional[str], Any]:
-        if prefix_len <= 0:
-            return None, None
-        prompt_prefix = tuple(prompt_ids[:prefix_len])
-        with self._context_lock:
-            best_sid = None
-            best_ctx = None
-            best_len = -1
-            for sid, ctx in self._native_kv_contexts.items():
-                tokens = self._native_kv_tokens.get(sid, ())
-                tlen = len(tokens)
-                if tlen < prefix_len:
-                    continue
-                if tuple(tokens[:prefix_len]) != prompt_prefix:
-                    continue
-                if tlen > best_len:
-                    best_len = tlen
-                    best_sid = sid
-                    best_ctx = ctx
-            return best_sid, best_ctx
-
-    def _bind_native_kv_context_for_request(self, context_id: str, prompt_ids: List[int], prefix_len: int) -> None:
-        debug = {
-            "enabled": bool(self._enable_kv_runtime_reuse),
-            "session_id": context_id,
-            "prefix_len": int(prefix_len),
-            "bound": False,
-            "source_session_id": None,
-            "set_kv_context_rc": None,
-        }
-        if not self._enable_kv_runtime_reuse or prefix_len <= 0:
-            self.model.set_kv_context(None)
-            with self._context_lock:
-                self._last_kv_bind_debug[context_id] = debug
-            return
-        with self._context_lock:
-            ctx = self._native_kv_contexts.get(context_id)
-        source_session_id = context_id if ctx else None
-        if not ctx:
-            source_session_id, ctx = self._find_native_kv_context_for_prefix(prompt_ids, prefix_len)
-            if not ctx:
-                self.model.set_kv_context(None)
-                with self._context_lock:
-                    self._last_kv_bind_debug[context_id] = debug
-                return
-        rc = self.model.set_kv_context(ctx)
-        debug["set_kv_context_rc"] = int(rc)
-        debug["source_session_id"] = source_session_id
-        if rc != 0:
-            self.model.set_kv_context(None)
-        else:
-            debug["bound"] = True
-        with self._context_lock:
-            self._last_kv_bind_debug[context_id] = debug
+        return self._session_mgr.request_stop(context_id)
 
     def kv_debug_snapshot(self, session_id: Optional[str] = None) -> Dict[str, Any]:
-        with self._context_lock:
-            if session_id:
-                last_bind = dict(self._last_kv_bind_debug.get(session_id, {}))
-                native_tokens = len(self._native_kv_tokens.get(session_id, ()))
-                has_native_ctx = session_id in self._native_kv_contexts
-            else:
-                last_bind = {}
-                native_tokens = 0
-                has_native_ctx = False
-            native_contexts = len(self._native_kv_contexts)
-            tracked_token_sessions = len(self._native_kv_tokens)
-        return {
-            "session_id": session_id,
-            "has_native_context": has_native_ctx,
-            "native_tokens": native_tokens,
-            "native_contexts": native_contexts,
-            "tracked_token_sessions": tracked_token_sessions,
-            "last_bind": last_bind,
-            "kv_pool": self._kv_pool.snapshot_stats(),
-        }
-
-    def _export_native_kv_context_after_request(self, context_id: str, tokens: List[int]) -> None:
-        if not self._enable_kv_runtime_reuse:
-            return
-        with self._context_lock:
-            ctx = self._native_kv_contexts.get(context_id)
-        if not ctx:
-            ctx = self.model.kv_context_create()
-            if not ctx:
-                return
-            with self._context_lock:
-                self._native_kv_contexts[context_id] = ctx
-        rc = self.model.export_kv_context(ctx, self._kv_pool.block_size)
-        if rc == 0:
-            with self._context_lock:
-                self._native_kv_tokens[context_id] = tuple(int(t) for t in tokens)
+        snapshot = self._kv_bridge.debug_snapshot(session_id)
+        snapshot["kv_pool"] = self._kv_pool.snapshot_stats()
+        return snapshot
 
     def _render_prompt(self, messages: List[Dict[str, str]], system_prompt: Optional[str]) -> str:
         templated_messages: List[Dict[str, str]] = []
@@ -429,7 +263,7 @@ class ChatService(IInferenceService):
             "seed": payload.get("seed", 0),
         }
 
-        context_id, messages = self._extract_messages(payload)
+        context_id, messages = self._session_mgr.extract_messages(payload)
         prompt = self._render_prompt(messages, str(system_prompt) if system_prompt else None)
         prompt_ids = self.tokenizer.encode(prompt)
         return context_id, messages, prompt_ids, sampling, max_new_tokens
@@ -523,8 +357,8 @@ class ChatService(IInferenceService):
             response_text = self._postprocess_text(self.tokenizer.decode(generated_ids))
             messages2 = list(messages)
             messages2.append({"role": "assistant", "content": response_text})
-            self._save_context_messages(context_id, messages2)
-            self._clear_stop(context_id)
+            self._session_mgr.save_messages(context_id, messages2)
+            self._session_mgr.clear_stop(context_id)
             out.append(
                 {
                     "session_id": context_id,
@@ -544,12 +378,12 @@ class ChatService(IInferenceService):
 
     def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         context_id, messages, prompt_ids, sampling, max_new_tokens = self._prepare_request(payload)
-        cancel_event = self._get_cancel_event(context_id)
-        self._clear_stop(context_id)
+        cancel_event = self._session_mgr.get_cancel_event(context_id)
+        self._session_mgr.clear_stop(context_id)
 
         with self._model_lock:
             acquire = self._kv_pool.acquire_context(context_id, prompt_ids)
-            self._bind_native_kv_context_for_request(context_id, prompt_ids, acquire.prefix_len)
+            self._kv_bridge.bind_for_request(context_id, prompt_ids, acquire.prefix_len)
             generated_ids: List[int] = []
             try:
                 for token_id in self._iter_generate_ids(
@@ -562,23 +396,21 @@ class ChatService(IInferenceService):
                     generated_ids.append(int(token_id))
                 cancelled = cancel_event.is_set()
                 if cancelled:
-                    # Stop requests should not commit unfinished assistant output
-                    # into server-side history/context.
                     self._active_tokens = list(prompt_ids)
                     self._kv_pool.update_context(context_id, prompt_ids)
                 else:
-                    # Update context chain with generated continuation.
                     self._kv_pool.update_context(context_id, self._active_tokens)
-                    self._export_native_kv_context_after_request(context_id, self._active_tokens)
+                    self._kv_bridge.export_after_request(
+                        context_id, self._active_tokens, self._kv_pool.block_size
+                    )
             except Exception:
-                # Release broken context to avoid leaked refs on failed request.
                 self._kv_pool.release_context(context_id)
-                self._release_native_kv_context(context_id)
+                self._kv_bridge.release(context_id)
                 raise
 
         response_text = self._postprocess_text(self.tokenizer.decode(generated_ids))
         if cancel_event.is_set():
-            self._clear_stop(context_id)
+            self._session_mgr.clear_stop(context_id)
             return {
                 "session_id": context_id,
                 "response": response_text,
@@ -591,8 +423,8 @@ class ChatService(IInferenceService):
             }
         messages = list(messages)
         messages.append({"role": "assistant", "content": response_text})
-        self._save_context_messages(context_id, messages)
-        self._clear_stop(context_id)
+        self._session_mgr.save_messages(context_id, messages)
+        self._session_mgr.clear_stop(context_id)
         return {
             "session_id": context_id,
             "response": response_text,
@@ -605,14 +437,14 @@ class ChatService(IInferenceService):
 
     def stream(self, payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
         context_id, messages, prompt_ids, sampling, max_new_tokens = self._prepare_request(payload)
-        cancel_event = self._get_cancel_event(context_id)
-        self._clear_stop(context_id)
+        cancel_event = self._session_mgr.get_cancel_event(context_id)
+        self._session_mgr.clear_stop(context_id)
 
         generated_ids: List[int] = []
         filtered = ""
         with self._model_lock:
             acquire = self._kv_pool.acquire_context(context_id, prompt_ids)
-            self._bind_native_kv_context_for_request(context_id, prompt_ids, acquire.prefix_len)
+            self._kv_bridge.bind_for_request(context_id, prompt_ids, acquire.prefix_len)
             try:
                 for token_id in self._iter_generate_ids(
                     prompt_ids=prompt_ids,
@@ -634,14 +466,16 @@ class ChatService(IInferenceService):
                     self._kv_pool.update_context(context_id, prompt_ids)
                 else:
                     self._kv_pool.update_context(context_id, self._active_tokens)
-                    self._export_native_kv_context_after_request(context_id, self._active_tokens)
+                    self._kv_bridge.export_after_request(
+                        context_id, self._active_tokens, self._kv_pool.block_size
+                    )
             except Exception:
                 self._kv_pool.release_context(context_id)
-                self._release_native_kv_context(context_id)
+                self._kv_bridge.release(context_id)
                 raise
 
         if cancel_event.is_set():
-            self._clear_stop(context_id)
+            self._session_mgr.clear_stop(context_id)
             yield {
                 "session_id": context_id,
                 "done": True,
@@ -657,8 +491,8 @@ class ChatService(IInferenceService):
 
         messages = list(messages)
         messages.append({"role": "assistant", "content": filtered})
-        self._save_context_messages(context_id, messages)
-        self._clear_stop(context_id)
+        self._session_mgr.save_messages(context_id, messages)
+        self._session_mgr.clear_stop(context_id)
         yield {
             "session_id": context_id,
             "done": True,

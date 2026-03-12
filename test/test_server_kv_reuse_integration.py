@@ -9,6 +9,8 @@ def _load_server_module():
     interfaces_path = root / "python" / "llaisys" / "interfaces.py"
     kv_path = root / "python" / "llaisys" / "kv_cache_pool.py"
     scheduler_path = root / "python" / "llaisys" / "scheduler.py"
+    session_mgr_path = root / "python" / "llaisys" / "session_manager.py"
+    kv_bridge_path = root / "python" / "llaisys" / "kv_runtime_bridge.py"
     server_path = root / "python" / "llaisys" / "server.py"
 
     # Load interfaces first (kv_cache_pool and server import from it)
@@ -32,10 +34,32 @@ def _load_server_module():
     sys.modules[scheduler_spec.name] = scheduler_mod
     scheduler_spec.loader.exec_module(scheduler_mod)
 
+    # Load session_manager (server.py imports from it)
+    session_mgr_mod = None
+    if session_mgr_path.exists():
+        sm_spec = importlib.util.spec_from_file_location("llaisys.session_manager", str(session_mgr_path))
+        if sm_spec is not None and sm_spec.loader is not None:
+            session_mgr_mod = importlib.util.module_from_spec(sm_spec)
+            sys.modules[sm_spec.name] = session_mgr_mod
+            sm_spec.loader.exec_module(session_mgr_mod)
+
+    # Load kv_runtime_bridge (server.py imports from it)
+    kv_bridge_mod = None
+    if kv_bridge_path.exists():
+        kb_spec = importlib.util.spec_from_file_location("llaisys.kv_runtime_bridge", str(kv_bridge_path))
+        if kb_spec is not None and kb_spec.loader is not None:
+            kv_bridge_mod = importlib.util.module_from_spec(kb_spec)
+            sys.modules[kb_spec.name] = kv_bridge_mod
+            kb_spec.loader.exec_module(kv_bridge_mod)
+
     fake_llaisys = types.ModuleType("llaisys")
     fake_llaisys.kv_cache_pool = kv_mod
     fake_llaisys.scheduler = scheduler_mod
     fake_llaisys.Tokenizer = object
+    if session_mgr_mod:
+        fake_llaisys.session_manager = session_mgr_mod
+    if kv_bridge_mod:
+        fake_llaisys.kv_runtime_bridge = kv_bridge_mod
     sys.modules["llaisys"] = fake_llaisys
     sys.modules["llaisys.kv_cache_pool"] = kv_mod
     sys.modules["llaisys.scheduler"] = scheduler_mod

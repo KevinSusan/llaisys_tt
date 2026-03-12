@@ -480,6 +480,42 @@
   - （√）使用 5 人 agent team（lead / architect / backend / qa / reviewer）完成完整开发流程。
   - （√）流程：审查报告 → 设计方案 → 代码实现 → 测试验证 → 最终审查 → 批准合入。
 
+### 2026-03-13（ChatService 职责拆分）
+
+- **设计方案（architect 主导）**
+  - （√）分析 ChatService 5 大职责（推理执行、会话管理、KV 复用、流式生成、批量生成）。
+  - （√）确定拆出 2 个独立模块，保留 3 个紧耦合职责在 ChatService 中。
+  - （√）输出设计文档 `docs/CHATSERVICE_SPLIT_DESIGN.md`。
+
+- **新增模块：SessionManager（session_manager.py，98 行）**
+  - （√）会话消息历史管理：`extract_messages()`、`save_messages()`、`get_messages()`。
+  - （√）取消事件管理：`get_cancel_event()`、`request_stop()`、`clear_stop()`。
+  - （√）支持分叉编辑（`edit_from_session_id` + `edit_message_index`）。
+  - （√）自有 `threading.Lock()`，与 ChatService 的 `_model_lock` 独立。
+
+- **新增模块：KVRuntimeBridge（kv_runtime_bridge.py，144 行）**
+  - （√）原生 C++ KV 上下文生命周期管理：`bind_for_request()`、`export_after_request()`、`release()`。
+  - （√）跨会话 donor 前缀匹配：`_find_for_prefix()`。
+  - （√）调试快照：`debug_snapshot()`。
+  - （√）`enabled` 属性控制整个模块是否为 no-op，开关逻辑集中。
+
+- **ChatService 瘦身（server.py）**
+  - （√）从 ~726 行瘦身到 ~506 行。
+  - （√）通过 `self._session_mgr` 和 `self._kv_bridge` 委托，替换原内联实现。
+  - （√）`IInferenceService` 接口签名全部不变。
+  - （√）HTTP API（`/chat`、SSE、`/chat/stop`、`/debug/*`）全部不变。
+  - （√）`main()` 构造参数不变。
+
+- **测试（qa 主导）**
+  - （√）新增 `test/test_chatservice_split.py`：19 个测试用例。
+  - （√）覆盖 SessionManager 单测（6）、KVRuntimeBridge 单测（4）、ChatService 集成（4）、接口兼容 + 回归（5）。
+  - （√）既有 4 个测试套件全部通过。
+
+- **审查结论**
+  - （√）职责边界清晰，接口完全兼容，并发安全（三把锁独立，锁顺序一致无死锁风险）。
+  - （√）reviewer 批准合入。
+  - （？）低优先级：`generate_packed_non_stream` 未经过 `_kv_bridge`，packed 路径暂不支持 KV 复用。
+
 ---
 
 ### 使用约定
