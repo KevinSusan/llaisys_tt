@@ -13,6 +13,7 @@ import llaisys
 from llaisys.interfaces import IInferenceService
 from llaisys.kv_cache_pool import KVCachePool
 from llaisys.kv_runtime_bridge import KVRuntimeBridge
+from llaisys.libllaisys import LlaisysSamplingParams
 from llaisys.models import Qwen2
 from llaisys.scheduler import InferenceScheduler, SchedulerQueueFullError, TaskTimeoutError
 from llaisys.session_manager import SessionManager
@@ -269,12 +270,17 @@ class ChatService(IInferenceService):
         return context_id, messages, prompt_ids, sampling, max_new_tokens
 
     def generate_packed_non_stream(self, payloads: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
-        """Best-effort packed non-stream path (greedy only).
+        """Best-effort packed non-stream path (greedy + sampling).
 
         Current safe scope:
         - non-stream requests only
-        - greedy path only (no sampling)
+        - greedy and sampling requests (mixed batches supported)
         - no history-edit branching fields
+
+        When any request uses sampling, the batch is routed through the
+        packed-sampling C API.  If that API is unavailable (old DLL), sampling
+        requests fall back to ``None`` so the scheduler handles them one by one.
+        Pure-greedy batches still use the original fast ``prefill_packed`` path.
         """
         if not payloads:
             return []
@@ -282,6 +288,8 @@ class ChatService(IInferenceService):
             return None
 
         prepared: List[Tuple[str, List[Dict[str, str]], List[int], Dict[str, Any], int]] = []
+        any_sampling = False
+        sampling_params_list: List[LlaisysSamplingParams] = []
         for payload in payloads:
             if payload.get("stream", False):
                 return None
@@ -298,6 +306,7 @@ class ChatService(IInferenceService):
             top_k = int(sampling.get("top_k", 1))
             top_p = float(sampling.get("top_p", 0.0))
             temperature = float(sampling.get("temperature", 0.0))
+            seed = int(sampling.get("seed", 0))
             if mode == "argmax":
                 use_sampling = False
             elif mode == "sample":
@@ -305,8 +314,18 @@ class ChatService(IInferenceService):
             else:
                 use_sampling = temperature > 0.0 or top_k > 1 or top_p > 0.0
             if use_sampling:
-                return None
+                any_sampling = True
+            sampling_params_list.append(LlaisysSamplingParams(
+                top_k=top_k, top_p=top_p,
+                temperature=temperature, seed=seed,
+            ))
             prepared.append((context_id, messages, prompt_ids, sampling, max_new_tokens))
+
+        # If any request needs sampling, check for the packed-sampling API.
+        # Fall back to None (single-request path) when the new DLL is absent.
+        if any_sampling:
+            if not hasattr(self.model, "prefill_packed_sampling") or not hasattr(self.model, "step_packed_sampling"):
+                return None
 
         prompts = [it[2] for it in prepared]
         generated_all: List[List[int]] = [[] for _ in prepared]
@@ -315,7 +334,10 @@ class ChatService(IInferenceService):
         eos = self._eos_token()
         with self._model_lock:
             self.model.reset_kv_cache()
-            next_tokens = self.model.prefill_packed(prompts)
+            if any_sampling:
+                next_tokens = self.model.prefill_packed_sampling(prompts, sampling_params_list)
+            else:
+                next_tokens = self.model.prefill_packed(prompts)
             if len(next_tokens) != len(prepared):
                 return None
             for i, tok in enumerate(next_tokens):
@@ -340,7 +362,10 @@ class ChatService(IInferenceService):
                     decode_inputs.append([int(last_step_inputs[i])])
                 if not any(active_mask):
                     break
-                step_tokens = self.model.step_packed(decode_inputs)
+                if any_sampling:
+                    step_tokens = self.model.step_packed_sampling(decode_inputs, sampling_params_list)
+                else:
+                    step_tokens = self.model.step_packed(decode_inputs)
                 if len(step_tokens) != len(generated_all):
                     return None
                 for i, tok in enumerate(step_tokens):

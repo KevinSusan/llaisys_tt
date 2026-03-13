@@ -107,6 +107,28 @@ def load_models(lib):
         ]
         lib.llaisysQwen2ModelStepPacked.restype = c_int32
 
+    if hasattr(lib, "llaisysQwen2ModelPrefillPackedSampling"):
+        lib.llaisysQwen2ModelPrefillPackedSampling.argtypes = [
+            LlaisysQwen2Model,
+            POINTER(c_int64),
+            POINTER(c_int64),
+            c_size_t,
+            POINTER(LlaisysSamplingParams),
+            POINTER(c_int64),
+        ]
+        lib.llaisysQwen2ModelPrefillPackedSampling.restype = c_int32
+
+    if hasattr(lib, "llaisysQwen2ModelStepPackedSampling"):
+        lib.llaisysQwen2ModelStepPackedSampling.argtypes = [
+            LlaisysQwen2Model,
+            POINTER(c_int64),
+            POINTER(c_int64),
+            c_size_t,
+            POINTER(LlaisysSamplingParams),
+            POINTER(c_int64),
+        ]
+        lib.llaisysQwen2ModelStepPackedSampling.restype = c_int32
+
     lib.llaisysQwen2ModelPrefillSampling.argtypes = [
         LlaisysQwen2Model,
         POINTER(c_int64),

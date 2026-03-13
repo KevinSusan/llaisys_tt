@@ -388,6 +388,80 @@ class Qwen2:
             raise RuntimeError(f"llaisysQwen2ModelStepPacked failed with code {ret}")
         return [int(out_buf[i]) for i in range(len(seqs))]
 
+    def prefill_packed_sampling(
+        self,
+        sequences: Sequence[Sequence[int]],
+        params_list: Sequence[LlaisysSamplingParams],
+    ) -> list[int]:
+        seqs = [list(s) for s in sequences]
+        if not seqs:
+            return []
+        if not hasattr(LIB_LLAISYS, "llaisysQwen2ModelPrefillPackedSampling"):
+            raise RuntimeError("llaisysQwen2ModelPrefillPackedSampling is unavailable in current llaisys.dll")
+        if len(params_list) != len(seqs):
+            raise ValueError("params_list length must match sequences length")
+        offsets = [0]
+        flat: list[int] = []
+        for s in seqs:
+            if not s:
+                raise ValueError("each packed sequence must be non-empty")
+            flat.extend(int(x) for x in s)
+            offsets.append(len(flat))
+        token_buf = (c_int64 * len(flat))(*flat)
+        off_buf = (c_int64 * len(offsets))(*offsets)
+        params_buf = (LlaisysSamplingParams * len(seqs))(*params_list)
+        out_buf = (c_int64 * len(seqs))()
+        ret = int(
+            LIB_LLAISYS.llaisysQwen2ModelPrefillPackedSampling(
+                self._model,
+                token_buf,
+                off_buf,
+                c_size_t(len(seqs)),
+                params_buf,
+                out_buf,
+            )
+        )
+        if ret != 0:
+            raise RuntimeError(f"llaisysQwen2ModelPrefillPackedSampling failed with code {ret}")
+        return [int(out_buf[i]) for i in range(len(seqs))]
+
+    def step_packed_sampling(
+        self,
+        sequences: Sequence[Sequence[int]],
+        params_list: Sequence[LlaisysSamplingParams],
+    ) -> list[int]:
+        seqs = [list(s) for s in sequences]
+        if not seqs:
+            return []
+        if not hasattr(LIB_LLAISYS, "llaisysQwen2ModelStepPackedSampling"):
+            raise RuntimeError("llaisysQwen2ModelStepPackedSampling is unavailable in current llaisys.dll")
+        if len(params_list) != len(seqs):
+            raise ValueError("params_list length must match sequences length")
+        offsets = [0]
+        flat: list[int] = []
+        for s in seqs:
+            if not s:
+                raise ValueError("each packed sequence must be non-empty")
+            flat.extend(int(x) for x in s)
+            offsets.append(len(flat))
+        token_buf = (c_int64 * len(flat))(*flat)
+        off_buf = (c_int64 * len(offsets))(*offsets)
+        params_buf = (LlaisysSamplingParams * len(seqs))(*params_list)
+        out_buf = (c_int64 * len(seqs))()
+        ret = int(
+            LIB_LLAISYS.llaisysQwen2ModelStepPackedSampling(
+                self._model,
+                token_buf,
+                off_buf,
+                c_size_t(len(seqs)),
+                params_buf,
+                out_buf,
+            )
+        )
+        if ret != 0:
+            raise RuntimeError(f"llaisysQwen2ModelStepPackedSampling failed with code {ret}")
+        return [int(out_buf[i]) for i in range(len(seqs))]
+
     def prefill_sampling(
         self,
         inputs: Sequence[int],
