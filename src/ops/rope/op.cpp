@@ -7,6 +7,9 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/rope_nvidia.hpp"
 #endif
+#ifdef ENABLE_ILUVATAR_API
+#include "nvidia/rope_nvidia.hpp"
+#endif
 
 namespace llaisys::ops {
 void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
@@ -41,6 +44,10 @@ void rope(tensor_t out, tensor_t in, tensor_t pos_ids, float theta) {
         return cpu::rope(out->data(), in->data(), pos_ids->data(), out->dtype(), seqlen, nhead, dim, theta);
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
+        return nvidia::rope(out->data(), in->data(), pos_ids->data(), out->dtype(), seqlen, nhead, dim, theta);
+#endif
+#ifdef ENABLE_ILUVATAR_API
+    case LLAISYS_DEVICE_ILUVATAR:
         return nvidia::rope(out->data(), in->data(), pos_ids->data(), out->dtype(), seqlen, nhead, dim, theta);
 #endif
     default:

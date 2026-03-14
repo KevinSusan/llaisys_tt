@@ -16,7 +16,7 @@ def main():
     )
     parser.add_argument("--prompt", default="你好", type=str)
     parser.add_argument("--max_new_tokens", default=64, type=int)
-    parser.add_argument("--device", default="cpu", choices=["cpu", "nvidia"])
+    parser.add_argument("--device", default="cpu", choices=["cpu", "nvidia", "iluvatar"])
     args = parser.parse_args()
 
     model_path = Path(args.model)

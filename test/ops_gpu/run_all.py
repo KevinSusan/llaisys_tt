@@ -6,7 +6,7 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device", default="nvidia", choices=["cpu", "nvidia"], type=str)
+    parser.add_argument("--device", default="nvidia", choices=["cpu", "nvidia", "iluvatar"], type=str)
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
 

@@ -7,6 +7,9 @@
 #ifdef ENABLE_NVIDIA_API
 #include "nvidia/argmax_nvidia.hpp"
 #endif
+#ifdef ENABLE_ILUVATAR_API
+#include "nvidia/argmax_nvidia.hpp"
+#endif
 
 
 namespace llaisys::ops {
@@ -30,6 +33,10 @@ void argmax(tensor_t max_idx, tensor_t max_val, tensor_t vals) {
         return cpu::argmax(max_idx->data(), max_val->data(), vals->data(), vals->dtype(), vals->numel());
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
+        return nvidia::argmax(max_idx->data(), max_val->data(), vals->data(), vals->dtype(), vals->numel());
+#endif
+#ifdef ENABLE_ILUVATAR_API
+    case LLAISYS_DEVICE_ILUVATAR:
         return nvidia::argmax(max_idx->data(), max_val->data(), vals->data(), vals->dtype(), vals->numel());
 #endif
     default:

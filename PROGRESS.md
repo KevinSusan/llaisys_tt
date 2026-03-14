@@ -655,6 +655,34 @@
   python -m llaisys.server --model "模型目录" --workers 4 --shared-model --kv-memory-threshold 0.85 --continuous-batching --kv-aware-routing
   ```
 
+### 2026-03-14（天数 Iluvatar CoreX 平台适配）
+
+- **设备枚举与运行时**
+  - （√）`include/llaisys.h` 新增 `LLAISYS_DEVICE_ILUVATAR = 2` 设备枚举。
+  - （√）`src/device/runtime_api.hpp` / `.cpp` 新增 `iluvatar` namespace 声明与 dispatch 分支。
+  - （√）`src/device/iluvatar/` 新增 5 个文件（runtime_api、resource、utils、devlink_stub），从 nvidia 复制改 namespace。
+
+- **算子 dispatch（kernel 零复制策略）**
+  - （√）9 个算子 `op.cpp` 均新增 `#ifdef ENABLE_ILUVATAR_API` 分支，直接调用 `nvidia::` 实现。
+  - （√）天数 CoreX SDK 完全兼容 CUDA API，kernel 代码无需修改。
+
+- **构建脚本**
+  - （√）新增 `xmake/iluvatar.lua`：两个 target（device + ops），使用 `clang++ -x cuda --cuda-gpu-arch=ivcore10`。
+  - （√）`xmake.lua` 新增 `option("iluvatar-gpu")` 开关，条件定义 `ENABLE_ILUVATAR_API`，三个 target 加 iluvatar 依赖。
+
+- **测试适配**
+  - （√）`test/test_utils.py` 新增 iluvatar 设备映射（`torch_device` / `llaisys_device` / `device_name`）。
+  - （√）所有测试文件（`test_runtime.py`、`run_all.py`、9 个 ops_gpu 测试、9 个 ops 测试、`test_infer.py`、`test_chat_minimal.py`）的 `--device` choices 均已加入 `"iluvatar"`。
+
+- **验证方式**
+  - 本机：`xmake build`（不开 iluvatar）确认不影响现有构建。
+  - 天数服务器：`xmake f --iluvatar-gpu=y && xmake build`，然后 `python test/test_runtime.py --device iluvatar` 和 `python test/ops_gpu/run_all.py --device iluvatar`。
+
+- **项目 #2 状态更新**
+  - （√）NVIDIA 平台 ✅（已有）。
+  - （√）天数 Iluvatar CoreX 平台 ✅（本次新增）。
+  - （？）服务器端编译验证与算子正确性测试待上机确认��
+
 ---
 
 ### 使用约定

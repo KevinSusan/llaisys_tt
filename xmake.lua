@@ -24,6 +24,18 @@ if has_config("nv-gpu") then
     includes("xmake/nvidia.lua")
 end
 
+-- ILUVATAR --
+option("iluvatar-gpu")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Whether to compile implementations for Iluvatar CoreX GPU")
+option_end()
+
+if has_config("iluvatar-gpu") then
+    add_defines("ENABLE_ILUVATAR_API")
+    includes("xmake/iluvatar.lua")
+end
+
 target("llaisys-utils")
     set_kind("static")
 
@@ -45,6 +57,9 @@ target("llaisys-device")
     add_deps("llaisys-device-cpu")
     if has_config("nv-gpu") then
         add_deps("llaisys-device-nvidia")
+    end
+    if has_config("iluvatar-gpu") then
+        add_deps("llaisys-device-iluvatar")
     end
 
     set_languages("cxx17")
@@ -95,6 +110,9 @@ target("llaisys-ops")
     if has_config("nv-gpu") then
         add_deps("llaisys-ops-nvidia")
     end
+    if has_config("iluvatar-gpu") then
+        add_deps("llaisys-ops-iluvatar")
+    end
 
     set_languages("cxx17")
     set_warnings("all", "error")
@@ -133,6 +151,11 @@ target("llaisys")
         set_policy("build.cuda.devlink", true)
         add_links("cudadevrt", "cudart")
         add_files("src/device/nvidia/devlink_stub.cu")
+    end
+    if has_config("iluvatar-gpu") then
+        add_linkdirs("/usr/local/corex/lib64")
+        add_links("cudart")
+        add_files("src/device/iluvatar/devlink_stub.cu")
     end
 
     
