@@ -155,7 +155,6 @@ target("llaisys")
     if has_config("iluvatar-gpu") then
         add_linkdirs("/usr/local/corex/lib64")
         add_links("cudart")
-        add_files("src/device/iluvatar/devlink_stub.cu")
     end
 
     

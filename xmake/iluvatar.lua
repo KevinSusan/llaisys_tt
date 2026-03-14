@@ -8,7 +8,10 @@ target("llaisys-device-iluvatar")
     add_linkdirs("/usr/local/corex/lib64")
     add_links("cudart")
 
-    add_files("../src/device/iluvatar/*.cu", {
+    add_files("../src/device/iluvatar/iluvatar_runtime_api.cu", {
+        rule = "iluvatar_cu"
+    })
+    add_files("../src/device/iluvatar/iluvatar_resource.cu", {
         rule = "iluvatar_cu"
     })
 
