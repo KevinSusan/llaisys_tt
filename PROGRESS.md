@@ -516,6 +516,31 @@
   - （√）reviewer 批准合入。
   - （？）低优先级：`generate_packed_non_stream` 未经过 `_kv_bridge`，packed 路径暂不支持 KV 复用。
 
+### 2026-03-14（采样请求批量路径）
+
+- **设计方案（architect 主导）**
+  - （√）分析现有 `generate_packed_non_stream` 仅支持非流式+贪心的限制。
+  - （√）设计 C API 扩展方案：新增 `PrefillPackedSampling` / `StepPackedSampling`，支持 per-sequence 采样参数。
+  - （√）输出设计文档 `docs/SAMPLING_BATCH_DESIGN.md`。
+
+- **实现（backend 主导）**
+  - （√）`python/llaisys/libllaisys/models.py`：新增 `LlaisysSamplingParams` ctypes 结构体，新增两个 packed sampling API 绑定，`hasattr` 保护兼容旧 DLL。
+  - （√）`python/llaisys/models/qwen2.py`：新增 `prefill_packed_sampling()` 和 `step_packed_sampling()` 方法，接受 per-sequence 采样参数数组。
+  - （√）`python/llaisys/server.py`：重写 `generate_packed_non_stream()`，采样请求不再回退单条处理，纯贪心批次仍走原路径。
+  - （√）`scheduler.py`、`interfaces.py` 签名不变，无需修改。
+
+- **测试（qa 主导）**
+  - （√）新增 `test/test_sampling_batch.py`：19 个测试用例，全部通过。
+  - （√）覆盖：纯贪心回归（2）、采样进入 packed（1）、参数组合（5）、混合批次（1）、边界条件（5）、旧 DLL 回退（3）、响应格式（2）。
+
+- **审查结论**
+  - （√）正确性、向后兼容、并发安全、接口兼容均无问题。
+  - （√）reviewer 批准合入。
+  - （？）低优先级建议：decode 循环中已结束序列仍传入 step（浪费算力）、缺少 seed=0 测试、ctypes 构造风格不一致。
+
+- **团队协作流程**
+  - （√）使用 4 人 agent team（architect / backend / qa / reviewer）完成完整开发流程。
+
 ---
 
 ### 使用约定
