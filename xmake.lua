@@ -157,9 +157,14 @@ target("llaisys")
         add_links("cudart")
         -- Explicitly remove cudadevrt for iluvatar
         before_link(function (target)
-            target:set("links", table.filter(target:get("links"), function(i, link)
-                return link ~= "cudadevrt"
-            end))
+            local links = target:get("links") or {}
+            local filtered = {}
+            for _, link in ipairs(links) do
+                if link ~= "cudadevrt" then
+                    table.insert(filtered, link)
+                end
+            end
+            target:set("links", filtered)
         end)
     end
 
