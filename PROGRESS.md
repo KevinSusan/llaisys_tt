@@ -621,6 +621,40 @@
   - （√）流式批量路径已从 ❌ 未实现 → ✅ 完成。
   - （√）项目 #4 完成度从 70% 提升至 85%，剩余缺口：共享模型池、共享 KV 池、KV 内存感知流控。
 
+### 2026-03-14（共享模型池 / 共享 KV 池 / KV 内存感知流控）
+
+- **共享模型池 + 共享 KV 池（server.py）**
+  - （√）`ChatService.__init__` 新增可选参数 `model_lock`、`kv_pool`、`kv_bridge`，传入时使用外部共享实例。
+  - （√）`main()` 新增 `--shared-model` 开关：启用后只加载一份模型/tokenizer/锁/KV池/KV桥，所有 worker 共享。
+  - （√）内存从 N×model_size 降到 1×model_size，跨 worker 前缀复用自动生效。
+  - （√）不传共享参数时行为完全不变，保留副本模式作为回退。
+
+- **KV 内存感知流控（interfaces.py / kv_cache_pool.py / scheduler.py）**
+  - （√）`IKVCachePool` 新增 `memory_pressure()` 抽象方法，返回 0.0~1.0。
+  - （√）`KVCachePool` 实现 `memory_pressure()`：取 `used_blocks/max_blocks` 和 `used_bytes/max_bytes` 的较大值。
+  - （√）`InferenceScheduler` 新增 `kv_memory_threshold` 参数（默认 0.0 = 关闭）。
+  - （√）`submit()` 在阈值 > 0 时检查内存压力，超阈值抛 `SchedulerQueueFullError`。
+  - （√）新增指标 `kv_memory_rejected`，`debug_snapshot` 新增 `kv_memory_pressure` 和 `kv_memory_threshold` 字段。
+  - （√）CLI 新增 `--kv-memory-threshold`（建议值 0.85）。
+
+- **共享池路由优化（scheduler.py）**
+  - （√）KV 感知路由检测到所有 worker 共享同一 KV 池时，只查询一次前缀命中，选队列最短的 worker 分发。
+  - （√）`kv_debug_snapshot` 共享池模式下避免重复统计。
+
+- **测试**
+  - （√）新增 `test/test_shared_model.py`：14 个测试用例，全部通过。
+  - （√）覆盖：共享实例同一性��独立实例隔离、memory_pressure 正确性与接口兼容、跨 worker 前缀复用、流控拒绝/放行/禁用、debug_snapshot 字段、kv_memory_rejected 指标、共享池不重复统计、共享模型并发生成、共享模型调度器端到端。
+  - （√）既有 6 个测试套件全部通过（86 个用例，0 失败）。
+
+- **项目 #4 状态更新**
+  - （√）共享模型池 ✅、共享 KV 池 ✅、KV 内存感知流控 ✅。
+  - （√）项目 #4 完成度从 85% 提升至 ~95%，剩余缺口：公平性/优先级调度、更细粒度的内存管理。
+
+- **推荐启动参数（共享模式）**
+  ```bash
+  python -m llaisys.server --model "模型目录" --workers 4 --shared-model --kv-memory-threshold 0.85 --continuous-batching --kv-aware-routing
+  ```
+
 ---
 
 ### 使用约定

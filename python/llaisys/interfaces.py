@@ -57,6 +57,15 @@ class IKVCachePool(ABC):
         pass
 
     @abstractmethod
+    def memory_pressure(self) -> float:
+        """返回 KV 内存压力值 (0.0~1.0)
+
+        取 used_blocks/max_blocks 和 used_bytes/max_bytes 的较大值。
+        调度器可用此值做流控决策。
+        """
+        pass
+
+    @abstractmethod
     def snapshot_stats(self) -> Dict[str, float]:
         """获取统计信息快照"""
         pass

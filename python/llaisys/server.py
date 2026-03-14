@@ -130,17 +130,20 @@ class ChatService(IInferenceService):
         block_size: int = 64,
         max_blocks: int = 4096,
         max_bytes: int = 256 * 1024 * 1024,
+        model_lock: Optional[threading.RLock] = None,
+        kv_pool: Optional[KVCachePool] = None,
+        kv_bridge: Optional[KVRuntimeBridge] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self._enable_kv_runtime_reuse = bool(enable_kv_runtime_reuse)
         # RLock allows cooperative iterator-level scheduling in continuous-batching mode.
-        self._model_lock = threading.RLock()
+        self._model_lock = model_lock if model_lock is not None else threading.RLock()
 
         # Delegated components
         self._session_mgr = SessionManager()
-        self._kv_bridge = KVRuntimeBridge(model, enabled=enable_kv_runtime_reuse)
-        self._kv_pool = KVCachePool(
+        self._kv_bridge = kv_bridge if kv_bridge is not None else KVRuntimeBridge(model, enabled=enable_kv_runtime_reuse)
+        self._kv_pool = kv_pool if kv_pool is not None else KVCachePool(
             block_size=block_size,
             max_blocks=max_blocks,
             max_bytes=max_bytes,
@@ -1004,28 +1007,69 @@ def main() -> None:
         type=int,
         help="max sequences per streaming batch (default 8)",
     )
+    parser.add_argument(
+        "--shared-model",
+        action="store_true",
+        help="share a single model instance and KV pool across all workers",
+    )
+    parser.add_argument(
+        "--kv-memory-threshold",
+        default=0.0,
+        type=float,
+        help="KV memory pressure threshold (0.0=disabled, 0.85=recommended)",
+    )
     args = parser.parse_args()
 
     tokenizer_path = _resolve_tokenizer_path(args.model, args.tokenizer)
     worker_count = max(1, int(args.workers))
     services: List[ChatService] = []
-    for _ in range(worker_count):
-        tokenizer = llaisys.Tokenizer(tokenizer_path)
+    if args.shared_model:
+        # Shared mode: one model, one tokenizer, one KV pool, one KV bridge, one lock
         model = Qwen2(
             args.model,
             llaisys.DeviceType.CPU if args.device == "cpu" else llaisys.DeviceType.NVIDIA,
         )
-        services.append(
-            ChatService(
-                model,
-                tokenizer,
-                model_path=args.model,
-                enable_kv_runtime_reuse=args.kv_runtime_reuse,
-                block_size=args.kv_block_size,
-                max_blocks=args.kv_max_blocks,
-                max_bytes=args.kv_max_bytes,
-            )
+        tokenizer = llaisys.Tokenizer(tokenizer_path)
+        shared_lock = threading.RLock()
+        shared_kv_pool = KVCachePool(
+            block_size=args.kv_block_size,
+            max_blocks=args.kv_max_blocks,
+            max_bytes=args.kv_max_bytes,
         )
+        shared_kv_bridge = KVRuntimeBridge(model, enabled=args.kv_runtime_reuse)
+        for _ in range(worker_count):
+            services.append(
+                ChatService(
+                    model,
+                    tokenizer,
+                    model_path=args.model,
+                    enable_kv_runtime_reuse=args.kv_runtime_reuse,
+                    block_size=args.kv_block_size,
+                    max_blocks=args.kv_max_blocks,
+                    max_bytes=args.kv_max_bytes,
+                    model_lock=shared_lock,
+                    kv_pool=shared_kv_pool,
+                    kv_bridge=shared_kv_bridge,
+                )
+            )
+    else:
+        for _ in range(worker_count):
+            tokenizer = llaisys.Tokenizer(tokenizer_path)
+            model = Qwen2(
+                args.model,
+                llaisys.DeviceType.CPU if args.device == "cpu" else llaisys.DeviceType.NVIDIA,
+            )
+            services.append(
+                ChatService(
+                    model,
+                    tokenizer,
+                    model_path=args.model,
+                    enable_kv_runtime_reuse=args.kv_runtime_reuse,
+                    block_size=args.kv_block_size,
+                    max_blocks=args.kv_max_blocks,
+                    max_bytes=args.kv_max_bytes,
+                )
+            )
     scheduler = InferenceScheduler(
         services,
         queue_size=max(1, int(args.queue_size)),
@@ -1033,6 +1077,7 @@ def main() -> None:
         continuous_batching=bool(args.continuous_batching),
         kv_aware_routing=bool(args.kv_aware_routing),
         max_batch_size=max(1, int(args.max_batch_size)),
+        kv_memory_threshold=float(args.kv_memory_threshold),
     )
     scheduler.start()
 
@@ -1041,9 +1086,11 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), handler)
     server.daemon_threads = True
     kv_routing_str = ", kv_aware_routing=on" if args.kv_aware_routing else ""
+    shared_str = ", shared_model=on" if args.shared_model else ""
+    kv_mem_str = f", kv_memory_threshold={args.kv_memory_threshold}" if args.kv_memory_threshold > 0 else ""
     print(
         f"LLAISYS chat server listening on http://{args.host}:{args.port} "
-        f"(workers={worker_count}, queue_size={max(1, int(args.queue_size))}{kv_routing_str})"
+        f"(workers={worker_count}, queue_size={max(1, int(args.queue_size))}{kv_routing_str}{shared_str}{kv_mem_str})"
     )
     try:
         server.serve_forever()

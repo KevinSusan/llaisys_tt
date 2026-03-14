@@ -259,6 +259,13 @@ class KVCachePool(IKVCachePool):
             if indexed and indexed[0] == block_id:
                 self._prefix_index.pop(block.prefix_key, None)
 
+    def memory_pressure(self) -> float:
+        """返回 KV 内存压力值 (0.0~1.0)"""
+        with self._lock:
+            block_ratio = len(self._blocks) / self.max_blocks if self.max_blocks > 0 else 0.0
+            byte_ratio = self._total_bytes / self.max_bytes if self.max_bytes > 0 else 0.0
+            return max(block_ratio, byte_ratio)
+
     def snapshot_stats(self) -> Dict[str, float]:
         """Return lightweight stats for verification and debugging."""
         with self._lock:

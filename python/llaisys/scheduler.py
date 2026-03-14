@@ -81,6 +81,7 @@ class InferenceScheduler:
         kv_aware_routing: bool = False,
         max_sticky_sessions: int = 10000,
         max_batch_size: int = 8,
+        kv_memory_threshold: float = 0.0,
     ) -> None:
         if not services:
             raise ValueError("services must not be empty")
@@ -91,6 +92,7 @@ class InferenceScheduler:
         self._kv_aware_routing = bool(kv_aware_routing)
         self._max_sticky_sessions = max(100, int(max_sticky_sessions))
         self._max_batch_size = max(1, int(max_batch_size))
+        self._kv_memory_threshold = float(kv_memory_threshold)
         self._queues: List["queue.Queue[Optional[InferenceTask]]"] = [
             queue.Queue(maxsize=self._queue_size) for _ in self._services
         ]
@@ -132,6 +134,8 @@ class InferenceScheduler:
             "stream_batch_decode_active_sum": 0.0,
             "stream_batch_shrink_events": 0.0,
             "stream_batch_fallback_tasks": 0.0,
+            # KV 内存流控指标
+            "kv_memory_rejected": 0.0,
         }
 
     def start(self) -> None:
@@ -156,6 +160,19 @@ class InferenceScheduler:
 
     def submit(self, payload: Dict[str, Any], stream: bool) -> TaskHandle:
         payload = dict(payload)  # shallow copy to avoid mutating caller's dict
+
+        # KV 内存感知流控：超过阈值时拒绝新请求
+        if self._kv_memory_threshold > 0:
+            try:
+                pressure = max(
+                    svc.kv_pool.memory_pressure() for svc in self._services
+                )
+            except Exception:
+                pressure = 0.0
+            if pressure > self._kv_memory_threshold:
+                with self._lock:
+                    self._metrics["kv_memory_rejected"] += 1.0
+                raise SchedulerQueueFullError("KV memory pressure too high")
 
         # 自动 tokenize：如果启用了 KV 感知路由且 payload 中没有 _prompt_tokens
         if (
@@ -242,21 +259,34 @@ class InferenceScheduler:
                 "avg_matched_tokens": 0.0,
             },
         }
-        hit_rate_numer = 0.0
-        hit_rate_denom = 0.0
-        matched_numer = 0.0
-        matched_denom = 0.0
-        for svc in self._services:
-            snap = svc.kv_debug_snapshot(None)
+
+        # 共享 KV 池优化：所有 worker 共享同一个池时只查询一次
+        first_pool = getattr(self._services[0], "kv_pool", None)
+        shared_pool = first_pool is not None and all(
+            getattr(svc, "kv_pool", None) is first_pool for svc in self._services[1:]
+        )
+
+        if shared_pool:
+            snap = self._services[0].kv_debug_snapshot(None)
             pool = snap.get("kv_pool", {})
-            for k in ("contexts", "blocks", "prefix_entries", "total_bytes", "zero_ref_blocks", "shared_blocks", "total_refs", "acquire_count", "prefix_hit_count"):
-                merged["kv_pool"][k] += float(pool.get(k, 0.0))
-            hit_rate_numer += float(pool.get("prefix_hit_count", 0.0))
-            hit_rate_denom += float(pool.get("acquire_count", 0.0))
-            matched_numer += float(pool.get("avg_matched_tokens", 0.0)) * float(pool.get("acquire_count", 0.0))
-            matched_denom += float(pool.get("acquire_count", 0.0))
-        merged["kv_pool"]["prefix_hit_rate"] = hit_rate_numer / hit_rate_denom if hit_rate_denom > 0 else 0.0
-        merged["kv_pool"]["avg_matched_tokens"] = matched_numer / matched_denom if matched_denom > 0 else 0.0
+            for k in merged["kv_pool"]:
+                merged["kv_pool"][k] = float(pool.get(k, 0.0))
+        else:
+            hit_rate_numer = 0.0
+            hit_rate_denom = 0.0
+            matched_numer = 0.0
+            matched_denom = 0.0
+            for svc in self._services:
+                snap = svc.kv_debug_snapshot(None)
+                pool = snap.get("kv_pool", {})
+                for k in ("contexts", "blocks", "prefix_entries", "total_bytes", "zero_ref_blocks", "shared_blocks", "total_refs", "acquire_count", "prefix_hit_count"):
+                    merged["kv_pool"][k] += float(pool.get(k, 0.0))
+                hit_rate_numer += float(pool.get("prefix_hit_count", 0.0))
+                hit_rate_denom += float(pool.get("acquire_count", 0.0))
+                matched_numer += float(pool.get("avg_matched_tokens", 0.0)) * float(pool.get("acquire_count", 0.0))
+                matched_denom += float(pool.get("acquire_count", 0.0))
+            merged["kv_pool"]["prefix_hit_rate"] = hit_rate_numer / hit_rate_denom if hit_rate_denom > 0 else 0.0
+            merged["kv_pool"]["avg_matched_tokens"] = matched_numer / matched_denom if matched_denom > 0 else 0.0
         return merged
 
     def debug_snapshot(self) -> Dict[str, Any]:
@@ -280,6 +310,13 @@ class InferenceScheduler:
             if metrics.get("kv_aware_routing_hits", 0.0) > 0
             else 0.0
         )
+        # KV memory pressure snapshot
+        try:
+            kv_memory_pressure = max(
+                svc.kv_pool.memory_pressure() for svc in self._services
+            )
+        except Exception:
+            kv_memory_pressure = 0.0
         return {
             "workers": len(self._services),
             "queue_size": self._queue_size,
@@ -289,6 +326,8 @@ class InferenceScheduler:
             "kv_aware_routing": self._kv_aware_routing,
             "kv_routing_hit_rate": kv_routing_hit_rate,
             "kv_routing_avg_prefix_len": kv_routing_avg_prefix_len,
+            "kv_memory_threshold": self._kv_memory_threshold,
+            "kv_memory_pressure": kv_memory_pressure,
             "max_batch_size": self._max_batch_size,
             "avg_batch_active": avg_batch_active,
             "sticky_sessions": sticky_sessions,
@@ -326,18 +365,34 @@ class InferenceScheduler:
             best_worker = -1
             best_prefix_len = -1
 
-            for idx, svc in enumerate(self._services):
+            # 共享 KV 池优化：所有 worker 共享同一个池时只查询一次
+            first_pool = getattr(self._services[0], "kv_pool", None)
+            shared_pool = first_pool is not None and all(
+                getattr(svc, "kv_pool", None) is first_pool for svc in self._services[1:]
+            )
+
+            if shared_pool:
                 try:
-                    kv_pool = getattr(svc, "kv_pool", None)
-                    if kv_pool is None:
-                        continue
-                    prefix_len = kv_pool.query_prefix_len(prompt_tokens)
-                    if prefix_len > best_prefix_len:
+                    prefix_len = first_pool.query_prefix_len(prompt_tokens)
+                    if prefix_len > 0:
                         best_prefix_len = prefix_len
-                        best_worker = idx
+                        # 共享池模式下选负载最轻的 worker
+                        best_worker = min(range(len(self._queues)), key=lambda i: self._queues[i].qsize())
                 except Exception:
-                    # 查询失败，跳过该 worker
-                    continue
+                    pass
+            else:
+                for idx, svc in enumerate(self._services):
+                    try:
+                        kv_pool = getattr(svc, "kv_pool", None)
+                        if kv_pool is None:
+                            continue
+                        prefix_len = kv_pool.query_prefix_len(prompt_tokens)
+                        if prefix_len > best_prefix_len:
+                            best_prefix_len = prefix_len
+                            best_worker = idx
+                    except Exception:
+                        # 查询失败，跳过该 worker
+                        continue
 
             with self._lock:
                 self._metrics["kv_aware_routing_attempts"] += 1.0
