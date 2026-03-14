@@ -155,8 +155,11 @@ target("llaisys")
         set_policy("build.cuda.devlink", false)
         add_linkdirs("/usr/local/corex/lib64")
         add_links("cudart")
-        -- Explicitly remove cudadevrt for iluvatar
-        before_link(function (target)
+    end
+
+    -- Remove cudadevrt for iluvatar after all links are collected
+    on_load(function (target)
+        if has_config("iluvatar-gpu") then
             local links = target:get("links") or {}
             local filtered = {}
             for _, link in ipairs(links) do
@@ -165,8 +168,8 @@ target("llaisys")
                 end
             end
             target:set("links", filtered)
-        end)
-    end
+        end
+    end)
 
     
     after_install(function (target)
