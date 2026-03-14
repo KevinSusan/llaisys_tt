@@ -580,6 +580,47 @@
   - （√）请��仍接受所有原有扩展字段（`session_id`、`edit_from_session_id`、`edit_message_index`、`sampling`、`prompt`）。
   - （√）用户可直接使用 OpenAI SDK、curl 模板或任何兼容 OpenAI API 的客户端调用。
 
+### 2026-03-14（流式批处理：流式请求走批量路径）
+
+- **设计目标**
+  - （√）解决流式请求仍逐条处理的性能缺口：`ChatService.stream()` 在整个生成过程中持有 `_model_lock`，无法让多个流式请求共享模型做批量前向。
+
+- **数据结构（server.py）**
+  - （√）新增 `BatchSequenceState`：单序列状态（token_ids、generated_tokens、finished、cancelled、max_new_tokens、session_id、stream）。
+  - （√）新增 `BatchState`：批状态（sequences 列表、model 引用、kv_contexts）。
+  - （√）新增 `StepResult`：单步结果（new_token_id、finished、finish_reason）。
+
+- **接口扩展（interfaces.py）**
+  - （√）`IInferenceService` 新增 `prepare_batch(payloads)` 可选方法（默认返回 None）。
+  - （√）`IInferenceService` 新增 `step_batch(state)` 可选方法（默认返回 None）。
+  - （√）`IInferenceService` 新增 `finalize_sequence(state, seq_index)` 可选方法（默认 no-op）。
+
+- **ChatService 批处理方法（server.py）**
+  - （√）`prepare_batch(payloads)`：执行 packed prefill，初始化 BatchState。
+  - （√）`step_batch(state)`：执行一步 decode，返回 StepResult 列表，动态缩批（仅活跃序列参与计算）。
+  - （√）`finalize_sequence(state, seq_index)`：保存已完成序列的会话历史。
+  - （√）`generate_packed_non_stream` 也应用了动态缩批优化。
+
+- **调度器重写（scheduler.py）**
+  - （√）`_worker_loop_continuous` 完全重写为 batch-driven 模式。
+  - （√）P 阶段：收集待处理任务（最多 `max_batch_size` 个），调用 `prepare_batch`。
+  - （√）D 阶段：循环调用 `step_batch`，每步向流式客户端推送 SSE chunk，已完成序列调用 `finalize_sequence`。
+  - （√）回退路径：`prepare_batch` 返回 None 时（无 packed API、edit-fork 等），回退到旧的 `svc.stream()` 迭代器路径。
+  - （√）新增 `max_batch_size` 参数（默认 8）。
+  - （√）新增 6 个流式批处理指标：`stream_batch_prefill_batches`、`stream_batch_decode_rounds`、`stream_batch_shrink_events`、`stream_batch_fallback_tasks`、`stream_batch_sequences_completed`、`stream_batch_sequences_cancelled`。
+
+- **CLI 参数（server.py）**
+  - （√）新增 `--max-batch-size`（默认 8），P 阶段最多取该数量任务组批。
+
+- **测试**
+  - （√）新增 `test/test_streaming_batch.py`：15 个测试用例，全部通过。
+  - （√）��盖：流式批处理正确 SSE chunk（多序列并行）、非流式走 batch 路径、混合流式+非流式、单序列取消、不同 max_new_tokens、批大小上限、动态缩批、无 packed API 回退、edit-fork 回退、调度器端到端、finalize 保存/取消。
+  - （√）既有 4 个测试套件全部通过（77 个用例，0 失败）。
+
+- **项目 #4 状态更新**
+  - （√）流式批量路径已从 ❌ 未实现 → ✅ 完成。
+  - （√）项目 #4 完成度从 70% 提升至 85%，剩余缺口：共享模型池、共享 KV 池、KV 内存感知流控。
+
 ---
 
 ### 使用约定

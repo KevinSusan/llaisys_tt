@@ -150,3 +150,36 @@ class IInferenceService(ABC):
             token ids 序列，如果无法 tokenize 则返回 None
         """
         return None
+
+    def prepare_batch(
+        self, payloads: Sequence[Dict[str, Any]]
+    ) -> Optional[Any]:
+        """准备���式批处理：prefill 所有序列，返回 BatchState（可选实现）
+
+        Args:
+            payloads: 多个请求参数
+
+        Returns:
+            BatchState 对象，如果不支持则返回 None
+        """
+        return None
+
+    def step_batch(self, state: Any) -> Optional[Sequence[Any]]:
+        """执行一步批量 decode，返回每个序列的 StepResult（可选实现）
+
+        Args:
+            state: prepare_batch 返回的 BatchState
+
+        Returns:
+            StepResult 列表，如果不支持则返回 None
+        """
+        return None
+
+    def finalize_sequence(self, state: Any, seq_index: int) -> None:
+        """完成单个序列：保存消息历史，清理状态（可选实现）
+
+        Args:
+            state: BatchState 对象
+            seq_index: 序列在 batch 中的索引
+        """
+        pass

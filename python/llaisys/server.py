@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import threading
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -16,6 +17,43 @@ from llaisys.kv_runtime_bridge import KVRuntimeBridge
 from llaisys.libllaisys import LlaisysSamplingParams
 from llaisys.models import Qwen2
 from llaisys.scheduler import InferenceScheduler, SchedulerQueueFullError, TaskTimeoutError
+
+
+# ---------------------------------------------------------------------------
+# Streaming batch data structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BatchSequenceState:
+    index: int
+    context_id: str
+    messages: List[Dict[str, str]]
+    prompt_ids: List[int]
+    generated_ids: List[int] = field(default_factory=list)
+    filtered_text: str = ""
+    max_new_tokens: int = 128
+    sampling: Dict[str, Any] = field(default_factory=dict)
+    sampling_params: Optional[LlaisysSamplingParams] = None
+    use_sampling: bool = False
+    cancel_event: Optional[threading.Event] = None
+    finished: bool = False
+    finish_reason: Optional[str] = None
+
+
+@dataclass
+class BatchState:
+    sequences: List[BatchSequenceState]
+    any_sampling: bool
+    eos_token: int
+
+
+@dataclass
+class StepResult:
+    seq_index: int
+    delta_text: str
+    finished: bool
+    finish_reason: Optional[str]
+    stopped: bool = False
 from llaisys.session_manager import SessionManager
 
 
@@ -413,36 +451,36 @@ class ChatService(IInferenceService):
                 if t >= 0:
                     generated_all[i].append(t)
                     last_step_inputs[i] = t
-            # Continue decode rounds for unfinished requests.
+            # Continue decode rounds for unfinished requests (dynamic shrinking).
             while True:
+                active_indices: List[int] = []
                 decode_inputs: List[List[int]] = []
-                active_mask: List[bool] = []
+                active_sp: List[LlaisysSamplingParams] = []
                 for i in range(len(generated_all)):
                     gen = generated_all[i]
-                    is_active = True
+                    if not gen:
+                        continue
                     if len(gen) >= max_new_tokens_list[i]:
-                        is_active = False
-                    elif eos >= 0 and gen and gen[-1] == eos:
-                        is_active = False
-                    elif not gen:
-                        is_active = False
-                    active_mask.append(is_active)
+                        continue
+                    if eos >= 0 and gen[-1] == eos:
+                        continue
+                    active_indices.append(i)
                     decode_inputs.append([int(last_step_inputs[i])])
-                if not any(active_mask):
+                    active_sp.append(sampling_params_list[i])
+                if not active_indices:
                     break
                 if any_sampling:
-                    step_tokens = self.model.step_packed_sampling(decode_inputs, sampling_params_list)
+                    step_tokens = self.model.step_packed_sampling(decode_inputs, active_sp)
                 else:
                     step_tokens = self.model.step_packed(decode_inputs)
-                if len(step_tokens) != len(generated_all):
+                if len(step_tokens) != len(active_indices):
                     return None
-                for i, tok in enumerate(step_tokens):
-                    if not active_mask[i]:
-                        continue
+                for j, tok in enumerate(step_tokens):
+                    ai = active_indices[j]
                     t = int(tok)
                     if t >= 0:
-                        generated_all[i].append(t)
-                        last_step_inputs[i] = t
+                        generated_all[ai].append(t)
+                        last_step_inputs[ai] = t
 
         out: List[Dict[str, Any]] = []
         for i, (context_id, messages, prompt_ids, _sampling, _max_new_tokens) in enumerate(prepared):
@@ -576,6 +614,212 @@ class ChatService(IInferenceService):
             "total_tokens": len(prompt_ids) + len(generated_ids),
         }
         yield _wrap_chunk(context_id, None, finish_reason, usage=usage)
+
+    # ------------------------------------------------------------------
+    # Streaming batch API (Phase 1)
+    # ------------------------------------------------------------------
+
+    def prepare_batch(self, payloads: List[Dict[str, Any]]) -> Optional[BatchState]:
+        """Prefill all sequences in a batch, return BatchState or None to fall back."""
+        if not payloads:
+            return None
+        if not hasattr(self.model, "prefill_packed") or not hasattr(self.model, "step_packed"):
+            return None
+
+        sequences: List[BatchSequenceState] = []
+        any_sampling = False
+        sampling_params_list: List[LlaisysSamplingParams] = []
+
+        for i, payload in enumerate(payloads):
+            # Edit-fork requests are not supported in batch path
+            if payload.get("edit_from_session_id"):
+                return None
+            try:
+                context_id, messages, prompt_ids, sampling, max_new_tokens = self._prepare_request(payload)
+            except Exception:
+                return None
+            if max_new_tokens <= 0:
+                return None
+
+            mode = str(sampling.get("mode", "")).strip().lower()
+            top_k = int(sampling.get("top_k", 1))
+            top_p = float(sampling.get("top_p", 0.0))
+            temperature = float(sampling.get("temperature", 0.0))
+            seed = int(sampling.get("seed", 0))
+            if mode == "argmax":
+                use_sampling = False
+            elif mode == "sample":
+                use_sampling = True
+            else:
+                use_sampling = temperature > 0.0 or top_k > 1 or top_p > 0.0
+            if use_sampling:
+                any_sampling = True
+
+            sp = LlaisysSamplingParams(top_k=top_k, top_p=top_p, temperature=temperature, seed=seed)
+            cancel_event = self._session_mgr.get_cancel_event(context_id)
+            self._session_mgr.clear_stop(context_id)
+
+            sequences.append(BatchSequenceState(
+                index=i,
+                context_id=context_id,
+                messages=messages,
+                prompt_ids=prompt_ids,
+                generated_ids=[],
+                filtered_text="",
+                max_new_tokens=max_new_tokens,
+                sampling=sampling,
+                sampling_params=sp,
+                use_sampling=use_sampling,
+                cancel_event=cancel_event,
+                finished=False,
+                finish_reason=None,
+            ))
+            sampling_params_list.append(sp)
+
+        # Check for packed-sampling API if needed
+        if any_sampling:
+            if not hasattr(self.model, "prefill_packed_sampling") or not hasattr(self.model, "step_packed_sampling"):
+                return None
+
+        prompts = [seq.prompt_ids for seq in sequences]
+        eos = self._eos_token()
+
+        with self._model_lock:
+            self.model.reset_kv_cache()
+            if any_sampling:
+                next_tokens = self.model.prefill_packed_sampling(prompts, sampling_params_list)
+            else:
+                next_tokens = self.model.prefill_packed(prompts)
+
+        if len(next_tokens) != len(sequences):
+            return None
+
+        for i, tok in enumerate(next_tokens):
+            t = int(tok)
+            if t >= 0:
+                sequences[i].generated_ids.append(t)
+                # Decode and compute initial filtered text
+                new_text = self.tokenizer.decode(sequences[i].generated_ids)
+                sequences[i].filtered_text = self._postprocess_text(new_text)
+            else:
+                sequences[i].finished = True
+                sequences[i].finish_reason = "stop"
+
+            # Check immediate termination
+            if not sequences[i].finished:
+                if eos >= 0 and t == eos:
+                    sequences[i].finished = True
+                    sequences[i].finish_reason = "stop"
+                elif len(sequences[i].generated_ids) >= sequences[i].max_new_tokens:
+                    sequences[i].finished = True
+                    sequences[i].finish_reason = "length"
+                elif sequences[i].cancel_event and sequences[i].cancel_event.is_set():
+                    sequences[i].finished = True
+                    sequences[i].finish_reason = "stop"
+
+        return BatchState(sequences=sequences, any_sampling=any_sampling, eos_token=eos)
+
+    def step_batch(self, state: BatchState) -> List[StepResult]:
+        """Execute one decode step for all active sequences. Dynamic shrinking: skip finished."""
+        results: List[StepResult] = []
+        active_indices: List[int] = []
+        decode_inputs: List[List[int]] = []
+        sampling_params_active: List[LlaisysSamplingParams] = []
+
+        for i, seq in enumerate(state.sequences):
+            if seq.finished:
+                continue
+            if seq.cancel_event and seq.cancel_event.is_set():
+                seq.finished = True
+                seq.finish_reason = "stop"
+                results.append(StepResult(
+                    seq_index=i, delta_text="", finished=True,
+                    finish_reason="stop", stopped=True,
+                ))
+                continue
+            active_indices.append(i)
+            last_tok = seq.generated_ids[-1] if seq.generated_ids else 0
+            decode_inputs.append([last_tok])
+            if seq.sampling_params is not None:
+                sampling_params_active.append(seq.sampling_params)
+
+        if not active_indices:
+            return results
+
+        with self._model_lock:
+            if state.any_sampling:
+                step_tokens = self.model.step_packed_sampling(decode_inputs, sampling_params_active)
+            else:
+                step_tokens = self.model.step_packed(decode_inputs)
+
+        if len(step_tokens) != len(active_indices):
+            # Model returned unexpected count; mark all active as finished
+            for ai in active_indices:
+                seq = state.sequences[ai]
+                seq.finished = True
+                seq.finish_reason = "stop"
+                results.append(StepResult(
+                    seq_index=ai, delta_text="", finished=True,
+                    finish_reason="stop", stopped=False,
+                ))
+            return results
+
+        for j, ai in enumerate(active_indices):
+            seq = state.sequences[ai]
+            t = int(step_tokens[j])
+
+            if t < 0:
+                seq.finished = True
+                seq.finish_reason = "stop"
+                results.append(StepResult(
+                    seq_index=ai, delta_text="", finished=True,
+                    finish_reason="stop", stopped=False,
+                ))
+                continue
+
+            seq.generated_ids.append(t)
+            new_text = self.tokenizer.decode(seq.generated_ids)
+            new_filtered = self._postprocess_text(new_text)
+            delta = new_filtered[len(seq.filtered_text):]
+            seq.filtered_text = new_filtered
+
+            # Check termination
+            finished = False
+            finish_reason = None
+            stopped = False
+
+            if state.eos_token >= 0 and t == state.eos_token:
+                finished = True
+                finish_reason = "stop"
+            elif len(seq.generated_ids) >= seq.max_new_tokens:
+                finished = True
+                finish_reason = "length"
+            elif seq.cancel_event and seq.cancel_event.is_set():
+                finished = True
+                finish_reason = "stop"
+                stopped = True
+
+            if finished:
+                seq.finished = True
+                seq.finish_reason = finish_reason
+
+            results.append(StepResult(
+                seq_index=ai, delta_text=delta, finished=finished,
+                finish_reason=finish_reason, stopped=stopped,
+            ))
+
+        return results
+
+    def finalize_sequence(self, state: BatchState, seq_index: int) -> None:
+        """Save session history and clean up for a completed sequence."""
+        seq = state.sequences[seq_index]
+        if seq.cancel_event and seq.cancel_event.is_set():
+            self._session_mgr.clear_stop(seq.context_id)
+            return
+        messages = list(seq.messages)
+        messages.append({"role": "assistant", "content": seq.filtered_text})
+        self._session_mgr.save_messages(seq.context_id, messages)
+        self._session_mgr.clear_stop(seq.context_id)
 
 
 class ChatHandler(BaseHTTPRequestHandler):
@@ -754,6 +998,12 @@ def main() -> None:
         action="store_true",
         help="enable KV-aware worker routing (query KV pool before dispatching)",
     )
+    parser.add_argument(
+        "--max-batch-size",
+        default=8,
+        type=int,
+        help="max sequences per streaming batch (default 8)",
+    )
     args = parser.parse_args()
 
     tokenizer_path = _resolve_tokenizer_path(args.model, args.tokenizer)
@@ -782,6 +1032,7 @@ def main() -> None:
         request_timeout_ms=max(0, int(args.request_timeout_ms)),
         continuous_batching=bool(args.continuous_batching),
         kv_aware_routing=bool(args.kv_aware_routing),
+        max_batch_size=max(1, int(args.max_batch_size)),
     )
     scheduler.start()
 

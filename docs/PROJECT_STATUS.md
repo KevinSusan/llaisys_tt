@@ -105,11 +105,12 @@
 - 已实现连续批处理（continuous batching）：每轮从池中取出若干请求组成批次（batch），通过 `Decoder::decodePacked` 执行一次批量前向推理，未完成的请求放回池中继续下一轮，最大化 GPU/CPU 利用率
 - 已实现 packed prefill 批量路径：多个新请求的 prompt 拼接为一个 packed 序列，通过分段注意力（`SelfAttentionSegmented`）一次前向完成，段间隔离互不干扰
 - 采样请求也已支持批量路径：不同请求可以使用不同的采样参数（temperature/top-k/top-p/seed），在同一批次中独立采样，不再回退到逐条处理
+- 流式请求已支持批量路径：调度器重写为 batch-driven 模式，多个流式请求共享模型做批��前向（`prepare_batch` → `step_batch` → `finalize_sequence`），支持动态缩批（已完成序列自动跳过），不支持 packed API 时自动回退到单条路径
 - 支持会话粘性路由：同一用户的请求优先路由到同一 worker，提高 KV Cache 命中率
 - 支持 KV 感知路由：调度器查询各 worker 的 KV 前缀命中情况，将请求路由到命中最长前缀的 worker，减少重复计算
 - 压测验证：稳态参数下（concurrency=2, max_new_tokens=16）成功率 100%，吞吐约 0.18 rps；packed 路径开启后吞吐提升至约 0.37 rps
 
-缺失的大能力：流式请求尚未走批量路径（仍逐条处理）、多 worker 仍为模型副本模式（N 个 worker = N 份模型权重，内存线性增长）、无公平性/优先级/老化调度策略、无 KV 内存感知流控。
+缺失的大能力：多 worker 仍为模型副本模式（N 个 worker = N 份模型权重，内存线性增长）、无公平性/优先级/老化调度策略、无 KV 内存感知流控。
 
 ### 微观
 
@@ -126,12 +127,16 @@
 | Packed Decode | `Decoder::decodePacked` 单轮批前向 | ✅ 完成 |
 | 分段注意力 | `llaisysSelfAttentionSegmented`（C/C++/Python） | ✅ 完成 |
 | 采样批量路径 | `prefill_packed_sampling` / `step_packed_sampling` | ✅ 完成 |
+| 流式批量路径 | `prepare_batch` / `step_batch` / `finalize_sequence` | ✅ 完成 |
+| 动态缩批 | step_batch 跳过已完成序列，decode 仅传活跃序列 | ✅ 完成 |
+| 批大小上限 | `--max-batch-size`（默认 8） | ✅ 完成 |
+| 流式批处理指标 | `stream_batch_prefill_*` / `stream_batch_decode_*` / `stream_batch_shrink_*` | ✅ 完成 |
 | 超时/流控 | `--request-timeout-ms`，队列满 429，超时 504 | ✅ 完成 |
 | 调度指标 | packed_prefill_*, kv_routing_*, batch_rounds, prefill_rounds, decode_rounds 等 | ✅ 完成 |
 | 压测脚本 | `scripts/benchmark_chat_scheduler.py` | ✅ 可用 |
 | 调度器测试 | `test/test_scheduler_inmemory.py` | ✅ 通过 |
 | 采样批量测试 | `test/test_sampling_batch.py`（19 用例） | ✅ 通过 |
-| 流式批量路径 | — | ❌ 未实现 |
+| 流式批量测试 | `test/test_streaming_batch.py`（15 用例） | ✅ 通过 |
 | 共享模型池 | 单模型 + 多推理线程 | ❌ 未实现 |
 | 共享 KV 池 | 跨 worker 统一 KVCache 管理 | ❌ 未实现 |
 | KV 内存感知流控 | 根据 KV 内存压力做准入控制 | ❌ 未实现 |
@@ -183,7 +188,7 @@
 | #1 优化 CPU 推理 | ░░░░░░░░░░░░░░░░░░░░ 0% | ❌ 未开始（算子功能已有，性能优化未做） |
 | #2 多平台 CUDA 适配 | ██████████░░░░░░░░░░ 50% | ⚠️ 仅完成 Nvidia，需再适配一个平台 |
 | #3 AI 聊天机器人 | ██████████████████░░ 90% | ✅ 核心功能完成 |
-| #4 多用户推理服务 | ██████████████░░░░░░ 70% | ⚠️ 缺流式批量/共享模型 |
+| #4 多用户推理服务 | ████████████████░░░░ 85% | ⚠️ 缺共享模型池/KV内存流控 |
 | #5 分布式推理 | ░░░░░░░░░░░░░░░░░░░░ 0% | ❌ 未开始 |
 | #6 支持新模型 | ░░░░░░░░░░░░░░░░░░░░ 0% | ❌ 未开始 |
 

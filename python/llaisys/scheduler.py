@@ -80,6 +80,7 @@ class InferenceScheduler:
         continuous_batching: bool = False,
         kv_aware_routing: bool = False,
         max_sticky_sessions: int = 10000,
+        max_batch_size: int = 8,
     ) -> None:
         if not services:
             raise ValueError("services must not be empty")
@@ -89,6 +90,7 @@ class InferenceScheduler:
         self._continuous_batching = bool(continuous_batching)
         self._kv_aware_routing = bool(kv_aware_routing)
         self._max_sticky_sessions = max(100, int(max_sticky_sessions))
+        self._max_batch_size = max(1, int(max_batch_size))
         self._queues: List["queue.Queue[Optional[InferenceTask]]"] = [
             queue.Queue(maxsize=self._queue_size) for _ in self._services
         ]
@@ -123,6 +125,13 @@ class InferenceScheduler:
             "kv_aware_routing_attempts": 0.0,
             "kv_aware_routing_hits": 0.0,
             "kv_aware_routing_best_prefix_len_sum": 0.0,
+            # 流式批处理指标
+            "stream_batch_prefill_batches": 0.0,
+            "stream_batch_prefill_tasks": 0.0,
+            "stream_batch_decode_rounds": 0.0,
+            "stream_batch_decode_active_sum": 0.0,
+            "stream_batch_shrink_events": 0.0,
+            "stream_batch_fallback_tasks": 0.0,
         }
 
     def start(self) -> None:
@@ -280,6 +289,7 @@ class InferenceScheduler:
             "kv_aware_routing": self._kv_aware_routing,
             "kv_routing_hit_rate": kv_routing_hit_rate,
             "kv_routing_avg_prefix_len": kv_routing_avg_prefix_len,
+            "max_batch_size": self._max_batch_size,
             "avg_batch_active": avg_batch_active,
             "sticky_sessions": sticky_sessions,
             "packed_prefill_last_error": packed_prefill_last_error,
@@ -419,8 +429,14 @@ class InferenceScheduler:
     def _worker_loop_continuous(self, idx: int) -> None:
         svc = self._services[idx]
         q = self._queues[idx]
-        prefill_pending: "deque[_ActiveTask]" = deque()
-        decode_active: List[_ActiveTask] = []
+        # Raw tasks waiting for prefill (not yet started)
+        prefill_pending: "deque[InferenceTask]" = deque()
+        # Fallback: legacy iterator-based active tasks
+        fallback_prefill: "deque[_ActiveTask]" = deque()
+        fallback_decode: List[_ActiveTask] = []
+        # Batch-driven decode state (from prepare_batch)
+        batch_state: Optional[Any] = None
+        batch_tasks: List[InferenceTask] = []  # parallel to batch_state.sequences
 
         def _append_from_queue(block: bool) -> None:
             while True:
@@ -431,21 +447,42 @@ class InferenceScheduler:
                 if task is None:
                     q.task_done()
                     return
-                try:
-                    it = svc.stream(task.payload)
-                    prefill_pending.append(_ActiveTask(task=task, iterator=it))
-                except Exception as exc:
-                    if task.stream:
-                        task.output_queue.put({"error": str(exc), "done": True})
-                    else:
-                        task.output_queue.put({"error": str(exc)})
-                    task.output_queue.put(_END)
-                    with self._lock:
-                        self._metrics["failed"] += 1.0
-                finally:
-                    q.task_done()
+                prefill_pending.append(task)
+                q.task_done()
                 block = False
 
+        def _emit_chunk(task: InferenceTask, chunk: dict) -> None:
+            """Send a stream chunk or accumulate for non-stream."""
+            task.output_queue.put(chunk)
+
+        def _emit_final_stream(task: InferenceTask, context_id: str,
+                               finish_reason: str, prompt_len: int,
+                               gen_len: int, stopped: bool) -> None:
+            usage = {
+                "prompt_tokens": prompt_len,
+                "completion_tokens": gen_len,
+                "total_tokens": prompt_len + gen_len,
+            }
+            from llaisys.server import _wrap_chunk
+            chunk = _wrap_chunk(context_id, None, finish_reason, usage=usage, stopped=stopped)
+            task.output_queue.put(chunk)
+            task.output_queue.put(_END)
+
+        def _emit_final_non_stream(task: InferenceTask, context_id: str,
+                                   content: str, finish_reason: str,
+                                   prompt_len: int, gen_len: int,
+                                   stopped: bool) -> None:
+            usage = {
+                "prompt_tokens": prompt_len,
+                "completion_tokens": gen_len,
+                "total_tokens": prompt_len + gen_len,
+            }
+            from llaisys.server import _wrap_completion
+            result = _wrap_completion(context_id, content, finish_reason, usage, stopped=stopped)
+            task.output_queue.put(result)
+            task.output_queue.put(_END)
+
+        # --- Fallback helpers (legacy iterator path) ---
         def _step_once(state: _ActiveTask) -> str:
             task = state.task
             it = state.iterator
@@ -462,8 +499,7 @@ class InferenceScheduler:
                 item = next(it)
                 if isinstance(item, dict):
                     self._bind_session(item.get("session_id"), idx)
-                # Detect stream completion: OpenAI format uses
-                # choices[0].finish_reason; legacy uses "done".
+
                 def _is_final(d: dict) -> bool:
                     if d.get("done"):
                         return True
@@ -495,19 +531,16 @@ class InferenceScheduler:
                         task.output_queue.put(_END)
                         return "done"
                     return "keep"
-                # Non-stream also consumes the same stream iterator.
                 if isinstance(item, dict) and _is_final(item):
                     if item.get("error"):
                         with self._lock:
                             self._metrics["failed"] += 1.0
                         task.output_queue.put({"error": str(item.get("error"))})
                     else:
-                        # Convert final stream chunk to non-stream completion format.
                         result = dict(item)
                         choices = result.get("choices")
                         if choices and isinstance(choices, list) and len(choices) > 0:
                             c = dict(choices[0])
-                            # Merge accumulated content with any final delta content.
                             acc = getattr(state, "accumulated_content", "")
                             delta = c.pop("delta", {})
                             final_content = acc + delta.get("content", "")
@@ -522,7 +555,6 @@ class InferenceScheduler:
                                 self._metrics["cancelled"] += 1.0
                     task.output_queue.put(_END)
                     return "done"
-                # Accumulate content from non-final chunks for non-stream.
                 choices = item.get("choices")
                 if choices and isinstance(choices, list) and len(choices) > 0:
                     delta = choices[0].get("delta", {})
@@ -550,33 +582,152 @@ class InferenceScheduler:
                 return "done"
 
         while not self._stop.is_set():
-            if not prefill_pending and not decode_active:
+            has_work = (
+                prefill_pending or fallback_prefill or fallback_decode
+                or (batch_state is not None)
+            )
+            if not has_work:
                 _append_from_queue(block=True)
-                if not prefill_pending and not decode_active:
+                if not prefill_pending:
                     continue
             else:
                 _append_from_queue(block=False)
 
             with self._lock:
+                total_active = (
+                    len(prefill_pending) + len(fallback_prefill) + len(fallback_decode)
+                    + (len([s for s in batch_state.sequences if not s.finished]) if batch_state else 0)
+                )
                 self._metrics["batch_rounds"] += 1.0
-                total_active = len(prefill_pending) + len(decode_active)
                 self._metrics["batch_active_sum"] += float(total_active)
                 self._metrics["batch_last_active"] = float(total_active)
-                self._metrics["prefill_last_active"] = float(len(prefill_pending))
-                self._metrics["decode_last_active"] = float(len(decode_active))
+                self._metrics["prefill_last_active"] = float(len(prefill_pending) + len(fallback_prefill))
+                decode_count = len(fallback_decode) + (
+                    len([s for s in batch_state.sequences if not s.finished]) if batch_state else 0
+                )
+                self._metrics["decode_last_active"] = float(decode_count)
 
-            # P stage: each round prefill at most one fresh request to control risk.
-            if prefill_pending:
+            # ============================================================
+            # P stage: try batch prefill for pending tasks
+            # ============================================================
+            if prefill_pending and batch_state is None:
                 with self._lock:
                     self._metrics["prefill_rounds"] += 1.0
 
-                # Try packed prefill for simple non-stream single-token requests.
+                # Collect candidates up to max_batch_size
+                batch_candidates: List[InferenceTask] = []
+                remaining: "deque[InferenceTask]" = deque()
+                decode_active_count = len(fallback_decode)
+                slots = self._max_batch_size - decode_active_count
+
+                while prefill_pending and len(batch_candidates) < slots:
+                    task = prefill_pending.popleft()
+                    # Check deadline
+                    if task.deadline_at is not None and time.time() > task.deadline_at:
+                        with self._lock:
+                            self._metrics["timed_out"] += 1.0
+                        if task.stream:
+                            task.output_queue.put({"error": "request timeout", "code": "timeout", "done": True})
+                        else:
+                            task.output_queue.put({"error": "request timeout", "code": "timeout"})
+                        task.output_queue.put(_END)
+                        continue
+                    batch_candidates.append(task)
+
+                if not batch_candidates:
+                    pass  # all timed out
+                elif len(batch_candidates) >= 1 and hasattr(svc, "prepare_batch"):
+                    # Try batch path
+                    try:
+                        payloads = [t.payload for t in batch_candidates]
+                        result = svc.prepare_batch(payloads)
+                    except Exception as exc:
+                        logger.debug("prepare_batch failed: %s", exc, exc_info=True)
+                        result = None
+
+                    if result is not None:
+                        batch_state = result
+                        batch_tasks = list(batch_candidates)
+                        with self._lock:
+                            self._metrics["stream_batch_prefill_batches"] += 1.0
+                            self._metrics["stream_batch_prefill_tasks"] += float(len(batch_candidates))
+
+                        # Emit first token chunks for each sequence
+                        from llaisys.server import _wrap_chunk
+                        for i, seq in enumerate(batch_state.sequences):
+                            task = batch_tasks[i]
+                            self._bind_session(seq.context_id, idx)
+                            if seq.filtered_text and task.stream:
+                                chunk = _wrap_chunk(seq.context_id, seq.filtered_text, None)
+                                task.output_queue.put(chunk)
+                            # If already finished after prefill
+                            if seq.finished:
+                                if task.stream:
+                                    _emit_final_stream(
+                                        task, seq.context_id, seq.finish_reason or "stop",
+                                        len(seq.prompt_ids), len(seq.generated_ids),
+                                        stopped=bool(seq.cancel_event and seq.cancel_event.is_set()),
+                                    )
+                                else:
+                                    _emit_final_non_stream(
+                                        task, seq.context_id, seq.filtered_text,
+                                        seq.finish_reason or "stop",
+                                        len(seq.prompt_ids), len(seq.generated_ids),
+                                        stopped=bool(seq.cancel_event and seq.cancel_event.is_set()),
+                                    )
+                                with self._lock:
+                                    self._metrics["completed"] += 1.0
+                                svc.finalize_sequence(batch_state, i)
+                        # If all finished after prefill, clear batch
+                        if all(s.finished for s in batch_state.sequences):
+                            batch_state = None
+                            batch_tasks = []
+                    else:
+                        # Fallback: push to legacy iterator path
+                        with self._lock:
+                            self._metrics["stream_batch_fallback_tasks"] += float(len(batch_candidates))
+                        for task in batch_candidates:
+                            try:
+                                it = svc.stream(task.payload)
+                                fallback_prefill.append(_ActiveTask(task=task, iterator=it))
+                            except Exception as exc:
+                                if task.stream:
+                                    task.output_queue.put({"error": str(exc), "done": True})
+                                else:
+                                    task.output_queue.put({"error": str(exc)})
+                                task.output_queue.put(_END)
+                                with self._lock:
+                                    self._metrics["failed"] += 1.0
+                else:
+                    # No prepare_batch available, use legacy path
+                    with self._lock:
+                        self._metrics["stream_batch_fallback_tasks"] += float(len(batch_candidates))
+                    for task in batch_candidates:
+                        try:
+                            it = svc.stream(task.payload)
+                            fallback_prefill.append(_ActiveTask(task=task, iterator=it))
+                        except Exception as exc:
+                            if task.stream:
+                                task.output_queue.put({"error": str(exc), "done": True})
+                            else:
+                                task.output_queue.put({"error": str(exc)})
+                            task.output_queue.put(_END)
+                            with self._lock:
+                                self._metrics["failed"] += 1.0
+
+            # Legacy P stage: step fallback prefill tasks one at a time
+            if fallback_prefill:
+                with self._lock:
+                    if not prefill_pending:
+                        self._metrics["prefill_rounds"] += 1.0
+
+                # Try packed prefill for non-stream fallback tasks
                 packed_candidates: List[_ActiveTask] = []
-                for state in prefill_pending:
+                for state in fallback_prefill:
                     if state.task.stream:
                         continue
                     packed_candidates.append(state)
-                    if len(packed_candidates) >= 8:
+                    if len(packed_candidates) >= self._max_batch_size:
                         break
                 if len(packed_candidates) >= 2 and (
                     hasattr(svc, "generate_packed_non_stream") or hasattr(svc, "generate_packed_once")
@@ -599,7 +750,7 @@ class InferenceScheduler:
                         packed_results = None
                     if isinstance(packed_results, list) and len(packed_results) == len(packed_candidates):
                         packed_ids = {id(st) for st in packed_candidates}
-                        prefill_pending = deque([st for st in prefill_pending if id(st) not in packed_ids])
+                        fallback_prefill = deque([st for st in fallback_prefill if id(st) not in packed_ids])
                         for st, result in zip(packed_candidates, packed_results):
                             st.task.output_queue.put(result)
                             st.task.output_queue.put(_END)
@@ -608,23 +759,97 @@ class InferenceScheduler:
                             self._metrics["packed_prefill_batches"] += 1.0
                             self._metrics["packed_prefill_tasks"] += float(len(packed_candidates))
                             self._packed_prefill_last_error = ""
-                        continue
-                    if not packed_exception:
+                        # Skip single step below if we consumed all
+                        if not fallback_prefill:
+                            pass
+                    elif not packed_exception:
                         with self._lock:
                             self._metrics["packed_prefill_none_returns"] += 1.0
 
-                state = prefill_pending.popleft()
-                status = _step_once(state)
-                if status == "keep":
-                    decode_active.append(state)
+                if fallback_prefill:
+                    state = fallback_prefill.popleft()
+                    status = _step_once(state)
+                    if status == "keep":
+                        fallback_decode.append(state)
 
-            # D stage: iterate all active decode requests once.
-            if decode_active:
+            # ============================================================
+            # D stage: batch decode
+            # ============================================================
+            if batch_state is not None:
+                active_before = len([s for s in batch_state.sequences if not s.finished])
+                with self._lock:
+                    self._metrics["decode_rounds"] += 1.0
+                    self._metrics["stream_batch_decode_rounds"] += 1.0
+                    self._metrics["stream_batch_decode_active_sum"] += float(active_before)
+
+                try:
+                    step_results = svc.step_batch(batch_state)
+                except Exception as exc:
+                    logger.debug("step_batch failed: %s", exc, exc_info=True)
+                    # Mark all active as failed
+                    for i, seq in enumerate(batch_state.sequences):
+                        if not seq.finished:
+                            seq.finished = True
+                            task = batch_tasks[i]
+                            if task.stream:
+                                task.output_queue.put({"error": str(exc), "done": True})
+                            else:
+                                task.output_queue.put({"error": str(exc)})
+                            task.output_queue.put(_END)
+                            with self._lock:
+                                self._metrics["failed"] += 1.0
+                    batch_state = None
+                    batch_tasks = []
+                    step_results = None
+
+                if step_results is not None:
+                    from llaisys.server import _wrap_chunk
+                    for sr in step_results:
+                        task = batch_tasks[sr.seq_index]
+                        seq = batch_state.sequences[sr.seq_index]
+
+                        if sr.delta_text and task.stream:
+                            chunk = _wrap_chunk(seq.context_id, sr.delta_text, None)
+                            task.output_queue.put(chunk)
+
+                        if sr.finished:
+                            if task.stream:
+                                _emit_final_stream(
+                                    task, seq.context_id, sr.finish_reason or "stop",
+                                    len(seq.prompt_ids), len(seq.generated_ids),
+                                    stopped=sr.stopped,
+                                )
+                            else:
+                                _emit_final_non_stream(
+                                    task, seq.context_id, seq.filtered_text,
+                                    sr.finish_reason or "stop",
+                                    len(seq.prompt_ids), len(seq.generated_ids),
+                                    stopped=sr.stopped,
+                                )
+                            with self._lock:
+                                self._metrics["completed"] += 1.0
+                                if sr.stopped:
+                                    self._metrics["cancelled"] += 1.0
+                            svc.finalize_sequence(batch_state, sr.seq_index)
+
+                    # Check for shrink events
+                    active_after = len([s for s in batch_state.sequences if not s.finished])
+                    if active_after < active_before and active_after > 0:
+                        with self._lock:
+                            self._metrics["stream_batch_shrink_events"] += 1.0
+
+                    # Clear batch if all done
+                    if all(s.finished for s in batch_state.sequences):
+                        batch_state = None
+                        batch_tasks = []
+
+            # Legacy D stage: iterate fallback decode tasks
+            if fallback_decode:
                 with self._lock:
                     self._metrics["decode_rounds"] += 1.0
                 next_decode: List[_ActiveTask] = []
-                for state in decode_active:
+                for state in fallback_decode:
                     status = _step_once(state)
                     if status == "keep":
                         next_decode.append(state)
-                decode_active = next_decode
+                fallback_decode = next_decode
