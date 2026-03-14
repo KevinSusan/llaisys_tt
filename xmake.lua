@@ -151,8 +151,7 @@ target("llaisys")
         set_policy("build.cuda.devlink", true)
         add_links("cudadevrt", "cudart")
         add_files("src/device/nvidia/devlink_stub.cu")
-    end
-    if has_config("iluvatar-gpu") then
+    elseif has_config("iluvatar-gpu") then
         add_linkdirs("/usr/local/corex/lib64")
         add_links("cudart")
     end
