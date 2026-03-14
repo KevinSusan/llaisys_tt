@@ -336,7 +336,8 @@ def test_pure_greedy_batch_uses_original_packed_path():
     assert result is not None, "Pure greedy batch should not return None"
     assert len(result) == 3
     for r in result:
-        assert "response" in r
+        assert "choices" in r
+        assert r["choices"][0]["message"]["content"] is not None
         assert "usage" in r
     assert model.prefill_packed_calls >= 1, "Should use prefill_packed for greedy"
     assert model.prefill_packed_sampling_calls == 0, "Should NOT use sampling variant for greedy"
@@ -374,7 +375,8 @@ def test_sampling_request_enters_packed_path():
 
     assert len(result) == 2
     for r in result:
-        assert "response" in r
+        assert "choices" in r
+        assert r["choices"][0]["message"]["content"] is not None
         assert "session_id" in r
     assert model.prefill_packed_sampling_calls >= 1, "Should use prefill_packed_sampling"
     print("  sampling request enters packed path OK")
@@ -511,6 +513,8 @@ def test_mixed_greedy_and_sampling_batch():
     assert "mix-g1" in session_ids
     assert "mix-s1" in session_ids
     assert "mix-g2" in session_ids
+    for r in result:
+        assert "choices" in r
     # Mixed batch should use sampling variant (greedy params are equivalent to argmax)
     assert model.prefill_packed_sampling_calls >= 1
     print("  mixed greedy+sampling batch OK")
@@ -662,7 +666,7 @@ def test_fallback_no_prefill_packed_at_all():
 # ===========================================================================
 
 def test_response_format_has_required_fields():
-    """Each response in batch should have session_id, response, usage."""
+    """Each response in batch should have session_id, choices, usage (OpenAI format)."""
     service, _ = _make_service()
     payloads = [_greedy_payload("fmt-1"), _greedy_payload("fmt-2")]
     result = service.generate_packed_non_stream(payloads)
@@ -670,7 +674,12 @@ def test_response_format_has_required_fields():
     assert result is not None
     for r in result:
         assert "session_id" in r, "Missing session_id"
-        assert "response" in r, "Missing response"
+        assert "choices" in r, "Missing choices"
+        assert "id" in r, "Missing id"
+        assert "object" in r, "Missing object"
+        assert r["object"] == "chat.completion"
+        assert r["choices"][0]["message"]["content"] is not None, "Missing content"
+        assert r["choices"][0]["finish_reason"] is not None, "Missing finish_reason"
         assert "usage" in r, "Missing usage"
         usage = r["usage"]
         assert "prompt_tokens" in usage

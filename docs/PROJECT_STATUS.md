@@ -64,7 +64,8 @@
 - 支持会话分叉编辑：用户可以修改历史某一轮的提问，AI 从该点重新生成回答，前缀 KV Cache 自动复用，避免重复计算
 - 实现了 KV Cache 池（`KVCachePool`）：分块存储、引用计数、sealed 前缀匹配、0 引用回收，单用户场景下已形成完整的复用闭环
 - 支持中断生成：用户可随时点击停止，服务端立即中断推理，不会将半截回复污染到下一轮上下文
-- 架构经过重构：ChatService 拆分为 SessionManager（会话管理）+ KVRuntimeBridge（KV 运行���桥接）+ 瘦身后的 ChatService（推理核心），职责清晰，可独立测试
+- 架构经过重构：ChatService 拆分为 SessionManager（会话管理）+ KVRuntimeBridge（KV 运行时桥接）+ 瘦身后的 ChatService（推理核心），职责清晰，可独立测试
+- API 已统一遵循 OpenAI Chat Completion 格式：`/v1/chat/completions` 端点，请求和响应结构与 OpenAI API 兼容（`model`、`messages`、`max_tokens`、`choices`、`usage`、`finish_reason`），流式响应遵循 SSE + `data: [DONE]` 协议，可直接使用 OpenAI SDK 或任何兼容客户端调用
 
 ### 微观
 
@@ -89,6 +90,7 @@
 | KV 池测试 | `test/test_kv_cache_pool.py` | ✅ 通过 |
 | 拆分测试 | `test/test_chatservice_split.py`（19 用例） | ✅ 通过 |
 | 代码审查修复测试 | `test/test_fixes.py`（19 用例） | ✅ 通过 |
+| OpenAI API 格式 | `server.py`（`_wrap_completion`/`_wrap_chunk`/`_wrap_error`） | ✅ 完成 |
 
 ---
 

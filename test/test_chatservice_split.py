@@ -83,6 +83,20 @@ def _load_modules():
     sys.modules["llaisys.kv_cache_pool"] = kv_mod
     sys.modules["llaisys.scheduler"] = scheduler_mod
     sys.modules["llaisys.interfaces"] = iface_mod
+
+    # fake libllaisys with stub LlaisysSamplingParams
+    fake_libllaisys = types.ModuleType("llaisys.libllaisys")
+
+    class _StubSamplingParams:
+        def __init__(self, top_k=1, top_p=0.0, temperature=0.0, seed=0):
+            self.top_k = top_k
+            self.top_p = top_p
+            self.temperature = temperature
+            self.seed = seed
+
+    fake_libllaisys.LlaisysSamplingParams = _StubSamplingParams
+    fake_llaisys.libllaisys = fake_libllaisys
+    sys.modules["llaisys.libllaisys"] = fake_libllaisys
     if session_mgr_mod:
         sys.modules["llaisys.session_manager"] = session_mgr_mod
     if kv_bridge_mod:
@@ -508,7 +522,8 @@ def test_chatservice_cancelled_does_not_save_messages():
 
     service._iter_generate_ids = _cancelled_iter
     result = service.generate({"session_id": "s-cancel", "prompt": "test", "max_new_tokens": 2})
-    assert result["stopped"] is True
+    assert result.get("stopped") is True
+    assert result["choices"][0]["finish_reason"] == "stop"
     assert len(model.export_calls) == 0
     print("  ChatService cancelled request does not save messages OK")
 
@@ -577,7 +592,7 @@ def test_regression_stream_works():
     """Regression: stream generation still works."""
     service, _ = _make_service()
     items = list(service.stream({"session_id": "reg-stream", "prompt": "hello", "max_new_tokens": 2}))
-    assert items[-1]["done"] is True
+    assert items[-1]["choices"][0]["finish_reason"] is not None
     assert items[-1]["session_id"] == "reg-stream"
     print("  regression: stream OK")
 

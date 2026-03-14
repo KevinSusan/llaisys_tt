@@ -203,7 +203,7 @@ const getActiveConversation = () => {
 };
 
 const streamChat = async (payload, bubble, convo, controller) => {
-  const res = await fetch(`${endpointInput.value}/chat`, {
+  const res = await fetch(`${endpointInput.value}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...payload, stream: true }),
@@ -226,15 +226,18 @@ const streamChat = async (payload, bubble, convo, controller) => {
     buffer = parts.pop() || "";
     for (const part of parts) {
       if (!part.startsWith("data: ")) continue;
-      const data = JSON.parse(part.slice(6));
+      const payload_str = part.slice(6).trim();
+      if (payload_str === "[DONE]") return;
+      const data = JSON.parse(payload_str);
       if (data.session_id && !convo.serverId) {
         convo.serverId = data.session_id;
       }
-      if (data.delta) {
-        const raw = (bubble.dataset.raw || "") + data.delta;
+      const delta = data.choices && data.choices[0] && data.choices[0].delta;
+      if (delta && delta.content) {
+        const raw = (bubble.dataset.raw || "") + delta.content;
         renderAssistantBubble(bubble, raw);
       }
-      if (data.done) {
+      if (data.choices && data.choices[0] && data.choices[0].finish_reason) {
         return;
       }
     }
@@ -292,7 +295,7 @@ form.addEventListener("submit", async (event) => {
   activeStreamController = new AbortController();
   const payload = {
     prompt,
-    max_new_tokens: Number(maxTokensInput.value) || 128,
+    max_tokens: Number(maxTokensInput.value) || 128,
     temperature: Number(temperatureInput.value) || 0,
     top_k: Number(topKInput.value) || 1,
     top_p: Number(topPInput.value) || 0,

@@ -23,12 +23,31 @@ class _Svc:
 
     def generate(self, payload):
         sid = str(payload.get("session_id") or "")
-        return {"session_id": sid, "worker": self.name}
+        return {
+            "id": f"chatcmpl-{sid}",
+            "object": "chat.completion",
+            "model": "qwen2",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+            "session_id": sid,
+            "worker": self.name,
+        }
 
     def stream(self, payload):
         sid = str(payload.get("session_id") or "")
-        yield {"session_id": sid, "delta": "x", "done": False}
-        yield {"session_id": sid, "done": True}
+        yield {
+            "id": f"chatcmpl-{sid}",
+            "object": "chat.completion.chunk",
+            "model": "qwen2",
+            "choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": None}],
+            "session_id": sid,
+        }
+        yield {
+            "id": f"chatcmpl-{sid}",
+            "object": "chat.completion.chunk",
+            "model": "qwen2",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "session_id": sid,
+        }
 
     def request_stop(self, session_id):
         self.stop_calls.append(session_id)
@@ -54,7 +73,14 @@ class _PackedSvc(_Svc):
         out = []
         for payload in payloads:
             sid = str(payload.get("session_id") or "")
-            out.append({"session_id": sid, "response": "p", "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+            out.append({
+                "id": f"chatcmpl-{sid}",
+                "object": "chat.completion",
+                "model": "qwen2",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "p"}, "finish_reason": "stop"}],
+                "session_id": sid,
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            })
         return out
 
     def generate_packed_non_stream(self, payloads):
@@ -73,8 +99,8 @@ def test_scheduler_non_stream_and_stream():
 
         h2 = scheduler.submit({"session_id": "s1"}, stream=True)
         items = list(h2.iter_stream())
-        assert items[-1]["done"] is True
-        assert items[0]["delta"] == "x"
+        assert items[-1]["choices"][0]["finish_reason"] is not None
+        assert items[0]["choices"][0]["delta"]["content"] == "x"
     finally:
         scheduler.stop()
 
@@ -127,7 +153,8 @@ def test_scheduler_continuous_batching_non_stream_path():
         h = scheduler.submit({"session_id": "s-cb"}, stream=False)
         r = h.get_result(timeout=2.0)
         assert r["session_id"] == "s-cb"
-        assert "response" in r
+        assert "choices" in r
+        assert r["choices"][0]["message"]["content"] is not None
         snap = scheduler.debug_snapshot()
         assert snap["continuous_batching"] is True
         assert snap["metrics"]["batch_rounds"] >= 1.0
@@ -147,8 +174,8 @@ def test_scheduler_continuous_batching_packed_prefill_path():
         h2 = scheduler.submit({"session_id": "b", "max_new_tokens": 1}, stream=False)
         r1 = h1.get_result(timeout=2.0)
         r2 = h2.get_result(timeout=2.0)
-        assert r1["response"] == "p"
-        assert r2["response"] == "p"
+        assert r1["choices"][0]["message"]["content"] == "p"
+        assert r2["choices"][0]["message"]["content"] == "p"
         snap = scheduler.debug_snapshot()
         assert snap["metrics"]["packed_prefill_batches"] >= 1.0
         assert snap["metrics"]["packed_prefill_tasks"] >= 2.0

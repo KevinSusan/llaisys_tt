@@ -462,40 +462,73 @@ class InferenceScheduler:
                 item = next(it)
                 if isinstance(item, dict):
                     self._bind_session(item.get("session_id"), idx)
+                # Detect stream completion: OpenAI format uses
+                # choices[0].finish_reason; legacy uses "done".
+                def _is_final(d: dict) -> bool:
+                    if d.get("done"):
+                        return True
+                    choices = d.get("choices")
+                    if choices and isinstance(choices, list) and len(choices) > 0:
+                        if choices[0].get("finish_reason") is not None:
+                            return True
+                    return False
+
+                def _is_stopped(d: dict) -> bool:
+                    if d.get("stopped"):
+                        return True
+                    choices = d.get("choices")
+                    if choices and isinstance(choices, list) and len(choices) > 0:
+                        if choices[0].get("finish_reason") == "stop":
+                            return True
+                    return False
+
                 if task.stream:
                     if not isinstance(item, dict):
                         raise RuntimeError("stream item must be dict")
                     task.output_queue.put(item)
                     state.emitted_any = True
-                    if item.get("done"):
+                    if _is_final(item):
                         with self._lock:
                             self._metrics["completed"] += 1.0
-                            if item.get("stopped"):
+                            if _is_stopped(item):
                                 self._metrics["cancelled"] += 1.0
                         task.output_queue.put(_END)
                         return "done"
                     return "keep"
                 # Non-stream also consumes the same stream iterator.
-                if isinstance(item, dict) and item.get("done"):
+                if isinstance(item, dict) and _is_final(item):
                     if item.get("error"):
                         with self._lock:
                             self._metrics["failed"] += 1.0
                         task.output_queue.put({"error": str(item.get("error"))})
                     else:
-                        result = {
-                            "session_id": item.get("session_id", ""),
-                            "response": item.get("response", ""),
-                            "usage": item.get("usage", {}),
-                        }
-                        if item.get("stopped"):
-                            result["stopped"] = True
+                        # Convert final stream chunk to non-stream completion format.
+                        result = dict(item)
+                        choices = result.get("choices")
+                        if choices and isinstance(choices, list) and len(choices) > 0:
+                            c = dict(choices[0])
+                            # Merge accumulated content with any final delta content.
+                            acc = getattr(state, "accumulated_content", "")
+                            delta = c.pop("delta", {})
+                            final_content = acc + delta.get("content", "")
+                            c["message"] = {"role": "assistant", "content": final_content}
+                            result["choices"] = [c]
+                        if result.get("object") == "chat.completion.chunk":
+                            result["object"] = "chat.completion"
+                        task.output_queue.put(result)
                         with self._lock:
                             self._metrics["completed"] += 1.0
-                            if item.get("stopped"):
+                            if _is_stopped(item):
                                 self._metrics["cancelled"] += 1.0
-                        task.output_queue.put(result)
                     task.output_queue.put(_END)
                     return "done"
+                # Accumulate content from non-final chunks for non-stream.
+                choices = item.get("choices")
+                if choices and isinstance(choices, list) and len(choices) > 0:
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        state.accumulated_content = getattr(state, "accumulated_content", "") + content
                 return "keep"
             except StopIteration:
                 with self._lock:

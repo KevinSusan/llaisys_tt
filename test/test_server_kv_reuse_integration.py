@@ -64,6 +64,20 @@ def _load_server_module():
     sys.modules["llaisys.kv_cache_pool"] = kv_mod
     sys.modules["llaisys.scheduler"] = scheduler_mod
 
+    # fake libllaisys with stub LlaisysSamplingParams
+    fake_libllaisys = types.ModuleType("llaisys.libllaisys")
+
+    class _StubSamplingParams:
+        def __init__(self, top_k=1, top_p=0.0, temperature=0.0, seed=0):
+            self.top_k = top_k
+            self.top_p = top_p
+            self.temperature = temperature
+            self.seed = seed
+
+    fake_libllaisys.LlaisysSamplingParams = _StubSamplingParams
+    fake_llaisys.libllaisys = fake_libllaisys
+    sys.modules["llaisys.libllaisys"] = fake_libllaisys
+
     fake_models = types.ModuleType("llaisys.models")
 
     class _StubQwen2:
@@ -214,7 +228,8 @@ def test_cancelled_request_does_not_export_native_kv():
 
     service._iter_generate_ids = _cancelled_iter
     result = service.generate({"session_id": "s-cancel", "prompt": "会取消", "max_new_tokens": 2})
-    assert result["stopped"] is True
+    assert result.get("stopped") is True
+    assert result["choices"][0]["finish_reason"] == "stop"
     assert len(model.export_calls) == 0
 
 

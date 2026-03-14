@@ -541,6 +541,45 @@
 - **团队协作流程**
   - （√）使用 4 人 agent team（architect / backend / qa / reviewer）完成完整开发流程。
 
+### 2026-03-14（docs 整理与项目进度总览）
+
+- **文档清理**
+  - （√）删除 3 个过时文档：`docs/new.md`、`docs/UPDATE_PLAN.md`、`docs/QA_REPORT.md`。
+  - （√）新建 `docs/PROJECT_STATUS.md`：按 6 个项目方向输出宏观+微观进度总结。
+  - （√）保留 4 个有参考价值的设计文档。
+
+### 2026-03-14（API 统一为 OpenAI Chat Completion 格式）
+
+- **server.py 重构**
+  - （√）新增 `_wrap_completion()` / `_wrap_chunk()` / `_wrap_error()` 辅助函数。
+  - （√）`generate()` 返回值统一为 OpenAI `chat.completion` 格式（含 `id`、`object`、`model`、`choices`、`usage`）。
+  - （√）`stream()` yield 统一为 OpenAI `chat.completion.chunk` 格式，流结束发送 `data: [DONE]`。
+  - （√）`generate_packed_non_stream()` 返回值同步统一。
+  - （√）`_prepare_request()` 支持 `max_tokens`（OpenAI 字段名）作为 `max_new_tokens` 的别名。
+  - （√）`finish_reason` 语义：正常完成 `"stop"`、达到长度限制 `"length"`、用户取消 `"stop"` + `stopped=true`。
+  - （√）`session_id` 作为扩展字段保留在所有响应中。
+  - （√）错误响应统一为 `{"error": {"message": ..., "type": ..., "code": ...}}` 格式。
+
+- **scheduler.py 适配**
+  - （√）连续批处理路径 `_step_once()` 适配新格式：通过 `choices[0].finish_reason` 检测流结束。
+  - （√）非流式连续批路径：将最终 stream chunk 转换为 `chat.completion` 格式（`delta` → `message`，`chunk` → `completion`）。
+  - （√）累积非最终 chunk 的 `delta.content`，确保非流式响应内容完整。
+
+- **frontend/app.js 适配**
+  - （√）请求 URL 从 `/chat` 改为 `/v1/chat/completions`。
+  - （√）请求字段 `max_new_tokens` 改为 `max_tokens`。
+  - （√）SSE 解析适配：`data.choices[0].delta.content` 替代 `data.delta`，`data: [DONE]` 替代 `data.done`。
+
+- **测试修复**
+  - （√）4 个测试文件补充 `llaisys.libllaisys` fake module（`LlaisysSamplingParams` stub）。
+  - （√）5 个测试文件断言和 mock 返回值适配 OpenAI 格式。
+  - （√）全部测试通过：`test_chatservice_split`（19）、`test_sampling_batch`（19）、`test_fixes`（19）、`test_scheduler_inmemory`、`test_server_kv_reuse_integration`。
+
+- **兼容性**
+  - （√）`/v1/chat/completions` 和 `/chat` 均可用（共享同一处理逻辑）。
+  - （√）请��仍接受所有原有扩展字段（`session_id`、`edit_from_session_id`、`edit_message_index`、`sampling`、`prompt`）。
+  - （√）用户可直接使用 OpenAI SDK、curl 模板或任何兼容 OpenAI API 的客户端调用。
+
 ---
 
 ### 使用约定

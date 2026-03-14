@@ -84,6 +84,20 @@ def _load_modules():
     sys.modules["llaisys.kv_cache_pool"] = kv_mod
     sys.modules["llaisys.scheduler"] = scheduler_mod
     sys.modules["llaisys.interfaces"] = iface_mod
+
+    # fake libllaisys with stub LlaisysSamplingParams
+    fake_libllaisys = types.ModuleType("llaisys.libllaisys")
+
+    class _StubSamplingParams:
+        def __init__(self, top_k=1, top_p=0.0, temperature=0.0, seed=0):
+            self.top_k = top_k
+            self.top_p = top_p
+            self.temperature = temperature
+            self.seed = seed
+
+    fake_libllaisys.LlaisysSamplingParams = _StubSamplingParams
+    fake_llaisys.libllaisys = fake_libllaisys
+    sys.modules["llaisys.libllaisys"] = fake_libllaisys
     if session_mgr_mod:
         sys.modules["llaisys.session_manager"] = session_mgr_mod
     if kv_bridge_mod:
@@ -148,13 +162,32 @@ class _Svc:
     def generate(self, payload):
         self.last_payload = dict(payload)
         sid = str(payload.get("session_id") or "")
-        return {"session_id": sid, "worker": self.name}
+        return {
+            "id": f"chatcmpl-{sid}",
+            "object": "chat.completion",
+            "model": "qwen2",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+            "session_id": sid,
+            "worker": self.name,
+        }
 
     def stream(self, payload):
         self.last_payload = dict(payload)
         sid = str(payload.get("session_id") or "")
-        yield {"session_id": sid, "delta": "x", "done": False}
-        yield {"session_id": sid, "done": True}
+        yield {
+            "id": f"chatcmpl-{sid}",
+            "object": "chat.completion.chunk",
+            "model": "qwen2",
+            "choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": None}],
+            "session_id": sid,
+        }
+        yield {
+            "id": f"chatcmpl-{sid}",
+            "object": "chat.completion.chunk",
+            "model": "qwen2",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "session_id": sid,
+        }
 
     def request_stop(self, session_id):
         self.stop_calls.append(session_id)
@@ -743,7 +776,7 @@ def test_regression_scheduler_stream():
     try:
         h = scheduler.submit({"session_id": "reg-2"}, stream=True)
         items = list(h.iter_stream())
-        assert items[-1]["done"] is True
+        assert items[-1]["choices"][0]["finish_reason"] is not None
     finally:
         scheduler.stop()
     print("  regression: scheduler stream OK")

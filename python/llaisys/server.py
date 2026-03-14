@@ -19,6 +19,69 @@ from llaisys.scheduler import InferenceScheduler, SchedulerQueueFullError, TaskT
 from llaisys.session_manager import SessionManager
 
 
+def _wrap_completion(
+    session_id: str,
+    content: str,
+    finish_reason: str,
+    usage: Dict[str, int],
+    stopped: bool = False,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "id": f"chatcmpl-{session_id}",
+        "object": "chat.completion",
+        "model": "qwen2",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage,
+        "session_id": session_id,
+    }
+    if stopped:
+        result["stopped"] = True
+    return result
+
+
+def _wrap_chunk(
+    session_id: str,
+    delta_content: Optional[str],
+    finish_reason: Optional[str],
+    usage: Optional[Dict[str, int]] = None,
+    stopped: bool = False,
+) -> Dict[str, Any]:
+    delta: Dict[str, str] = {}
+    if delta_content is not None:
+        delta["content"] = delta_content
+    chunk: Dict[str, Any] = {
+        "id": f"chatcmpl-{session_id}",
+        "object": "chat.completion.chunk",
+        "model": "qwen2",
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }
+        ],
+        "session_id": session_id,
+    }
+    if usage is not None:
+        chunk["usage"] = usage
+    if stopped:
+        chunk["stopped"] = True
+    return chunk
+
+
+def _wrap_error(message: str, error_type: str = "server_error", code: str = "") -> Dict[str, Any]:
+    err: Dict[str, Any] = {"error": {"message": message, "type": error_type}}
+    if code:
+        err["error"]["code"] = code
+    return err
+
+
 class ChatService(IInferenceService):
     def __init__(
         self,
@@ -255,7 +318,12 @@ class ChatService(IInferenceService):
 
     def _prepare_request(self, payload: Dict[str, Any]) -> Tuple[str, List[Dict[str, str]], List[int], Dict[str, Any], int]:
         system_prompt = payload.get("system_prompt")
-        max_new_tokens = int(payload.get("max_new_tokens", 128))
+        # Accept OpenAI's max_tokens as alias; prefer it over max_new_tokens
+        if "max_tokens" in payload:
+            max_new_tokens = int(payload["max_tokens"])
+        else:
+            max_new_tokens = int(payload.get("max_new_tokens", 128))
+        # model field accepted and ignored
         sampling = {
             "mode": payload.get("sampling"),
             "top_k": payload.get("top_k", 1),
@@ -384,17 +452,14 @@ class ChatService(IInferenceService):
             messages2.append({"role": "assistant", "content": response_text})
             self._session_mgr.save_messages(context_id, messages2)
             self._session_mgr.clear_stop(context_id)
-            out.append(
-                {
-                    "session_id": context_id,
-                    "response": response_text,
-                    "usage": {
-                        "prompt_tokens": len(prompt_ids),
-                        "completion_tokens": len(generated_ids),
-                        "total_tokens": len(prompt_ids) + len(generated_ids),
-                    },
-                }
-            )
+            usage = {
+                "prompt_tokens": len(prompt_ids),
+                "completion_tokens": len(generated_ids),
+                "total_tokens": len(prompt_ids) + len(generated_ids),
+            }
+            hit_limit = len(generated_ids) >= _max_new_tokens
+            finish_reason = "length" if hit_limit else "stop"
+            out.append(_wrap_completion(context_id, response_text, finish_reason, usage))
         return out
 
     # Backward-compatible alias used by scheduler tests/mocks.
@@ -434,31 +499,21 @@ class ChatService(IInferenceService):
                 raise
 
         response_text = self._postprocess_text(self.tokenizer.decode(generated_ids))
+        usage = {
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": len(generated_ids),
+            "total_tokens": len(prompt_ids) + len(generated_ids),
+        }
         if cancel_event.is_set():
             self._session_mgr.clear_stop(context_id)
-            return {
-                "session_id": context_id,
-                "response": response_text,
-                "stopped": True,
-                "usage": {
-                    "prompt_tokens": len(prompt_ids),
-                    "completion_tokens": len(generated_ids),
-                    "total_tokens": len(prompt_ids) + len(generated_ids),
-                },
-            }
+            return _wrap_completion(context_id, response_text, "stop", usage, stopped=True)
+        hit_limit = len(generated_ids) >= max_new_tokens
+        finish_reason = "length" if hit_limit else "stop"
         messages = list(messages)
         messages.append({"role": "assistant", "content": response_text})
         self._session_mgr.save_messages(context_id, messages)
         self._session_mgr.clear_stop(context_id)
-        return {
-            "session_id": context_id,
-            "response": response_text,
-            "usage": {
-                "prompt_tokens": len(prompt_ids),
-                "completion_tokens": len(generated_ids),
-                "total_tokens": len(prompt_ids) + len(generated_ids),
-            },
-        }
+        return _wrap_completion(context_id, response_text, finish_reason, usage)
 
     def stream(self, payload: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
         context_id, messages, prompt_ids, sampling, max_new_tokens = self._prepare_request(payload)
@@ -484,7 +539,7 @@ class ChatService(IInferenceService):
                     delta = new_filtered[len(filtered) :]
                     filtered = new_filtered
                     if delta:
-                        yield {"session_id": context_id, "delta": delta, "done": False}
+                        yield _wrap_chunk(context_id, delta, None)
                 cancelled = cancel_event.is_set()
                 if cancelled:
                     self._active_tokens = list(prompt_ids)
@@ -501,33 +556,26 @@ class ChatService(IInferenceService):
 
         if cancel_event.is_set():
             self._session_mgr.clear_stop(context_id)
-            yield {
-                "session_id": context_id,
-                "done": True,
-                "stopped": True,
-                "response": filtered,
-                "usage": {
-                    "prompt_tokens": len(prompt_ids),
-                    "completion_tokens": len(generated_ids),
-                    "total_tokens": len(prompt_ids) + len(generated_ids),
-                },
+            usage = {
+                "prompt_tokens": len(prompt_ids),
+                "completion_tokens": len(generated_ids),
+                "total_tokens": len(prompt_ids) + len(generated_ids),
             }
+            yield _wrap_chunk(context_id, None, "stop", usage=usage, stopped=True)
             return
 
         messages = list(messages)
         messages.append({"role": "assistant", "content": filtered})
         self._session_mgr.save_messages(context_id, messages)
         self._session_mgr.clear_stop(context_id)
-        yield {
-            "session_id": context_id,
-            "done": True,
-            "response": filtered,
-            "usage": {
-                "prompt_tokens": len(prompt_ids),
-                "completion_tokens": len(generated_ids),
-                "total_tokens": len(prompt_ids) + len(generated_ids),
-            },
+        hit_limit = len(generated_ids) >= max_new_tokens
+        finish_reason = "length" if hit_limit else "stop"
+        usage = {
+            "prompt_tokens": len(prompt_ids),
+            "completion_tokens": len(generated_ids),
+            "total_tokens": len(prompt_ids) + len(generated_ids),
         }
+        yield _wrap_chunk(context_id, None, finish_reason, usage=usage)
 
 
 class ChatHandler(BaseHTTPRequestHandler):
@@ -572,7 +620,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         if parsed.path == "/debug/scheduler":
             self._send_json(200, self.scheduler.debug_snapshot())
             return
-        self._send_json(404, {"error": "not found"})
+        self._send_json(404, _wrap_error("not found", "invalid_request_error", "not_found"))
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)
@@ -582,7 +630,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if self.path not in ("/chat", "/v1/chat/completions", "/chat/stop"):
-            self._send_json(404, {"error": "not found"})
+            self._send_json(404, _wrap_error("not found", "invalid_request_error", "not_found"))
             return
 
         length = int(self.headers.get("Content-Length", "0"))
@@ -590,13 +638,13 @@ class ChatHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(body.decode("utf-8"))
         except Exception:
-            self._send_json(400, {"error": "invalid JSON"})
+            self._send_json(400, _wrap_error("invalid JSON", "invalid_request_error", "invalid_json"))
             return
 
         if self.path == "/chat/stop":
             session_id = str(payload.get("session_id") or "").strip()
             if not session_id:
-                self._send_json(400, {"error": "session_id is required"})
+                self._send_json(400, _wrap_error("session_id is required", "invalid_request_error", "missing_field"))
                 return
             self.scheduler.request_stop(session_id)
             self._send_json(200, {"ok": True, "session_id": session_id})
@@ -609,16 +657,18 @@ class ChatHandler(BaseHTTPRequestHandler):
                 result = handle.get_result(timeout=self.scheduler.request_timeout_seconds())
                 if isinstance(result, dict) and result.get("error"):
                     code = 504 if result.get("code") == "timeout" else 400
-                    self._send_json(code, {"error": str(result.get("error"))})
+                    err = result.get("error")
+                    err_code = str(result.get("code", "")) or "server_error"
+                    self._send_json(code, _wrap_error(str(err), "server_error", err_code))
                     return
             except SchedulerQueueFullError as exc:
-                self._send_json(429, {"error": str(exc)})
+                self._send_json(429, _wrap_error(str(exc), "server_error", "queue_full"))
                 return
             except TaskTimeoutError as exc:
-                self._send_json(504, {"error": str(exc)})
+                self._send_json(504, _wrap_error(str(exc), "server_error", "timeout"))
                 return
             except RuntimeError as exc:
-                self._send_json(400, {"error": str(exc)})
+                self._send_json(400, _wrap_error(str(exc), "server_error"))
                 return
             self._send_json(200, result)
             return
@@ -641,18 +691,22 @@ class ChatHandler(BaseHTTPRequestHandler):
                     if current_session_id:
                         self.scheduler.request_stop(current_session_id)
                     return
+            self._write_chunk(b"data: [DONE]\n\n")
         except SchedulerQueueFullError as exc:
-            data = json.dumps({"error": str(exc), "code": "queue_full", "done": True}, ensure_ascii=False).encode("utf-8")
+            err = _wrap_error(str(exc), "server_error", "queue_full")
+            data = json.dumps(err, ensure_ascii=False).encode("utf-8")
             self._write_chunk(b"data: " + data + b"\n\n")
         except TaskTimeoutError as exc:
             if current_session_id:
                 self.scheduler.request_stop(current_session_id)
-            data = json.dumps({"error": str(exc), "code": "timeout", "done": True}, ensure_ascii=False).encode("utf-8")
+            err = _wrap_error(str(exc), "server_error", "timeout")
+            data = json.dumps(err, ensure_ascii=False).encode("utf-8")
             self._write_chunk(b"data: " + data + b"\n\n")
         except Exception as exc:
             if current_session_id:
                 self.scheduler.request_stop(current_session_id)
-            data = json.dumps({"error": str(exc), "done": True}, ensure_ascii=False).encode("utf-8")
+            err = _wrap_error(str(exc), "server_error")
+            data = json.dumps(err, ensure_ascii=False).encode("utf-8")
             self._write_chunk(b"data: " + data + b"\n\n")
         finally:
             self._write_chunk(b"")
