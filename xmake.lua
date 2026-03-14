@@ -152,8 +152,15 @@ target("llaisys")
         add_links("cudadevrt", "cudart")
         add_files("src/device/nvidia/devlink_stub.cu")
     elseif has_config("iluvatar-gpu") then
+        set_policy("build.cuda.devlink", false)
         add_linkdirs("/usr/local/corex/lib64")
         add_links("cudart")
+        -- Explicitly remove cudadevrt for iluvatar
+        before_link(function (target)
+            target:set("links", table.filter(target:get("links"), function(i, link)
+                return link ~= "cudadevrt"
+            end))
+        end)
     end
 
     
