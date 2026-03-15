@@ -155,6 +155,8 @@ target("llaisys")
         -- No .cu files in this target, no CUDA toolchain, just link cudart
         add_linkdirs("/usr/local/corex/lib64")
         add_links("cudart")
+        -- Force whole-archive for iluvatar static libs so all symbols are included
+        add_ldflags("-Wl,--whole-archive", "-lllaisys-ops-iluvatar", "-lllaisys-device-iluvatar", "-Wl,--no-whole-archive", {force = true})
     end
 
     
