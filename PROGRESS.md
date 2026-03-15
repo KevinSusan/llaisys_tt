@@ -681,7 +681,36 @@
 - **项目 #2 状态更新**
   - （√）NVIDIA 平台 ✅（已有）。
   - （√）天数 Iluvatar CoreX 平台 ✅（本次新增）。
-  - （？）服务器端编译验证与算子正确性测试待上机确认��
+  - （√）服务器端编译验证与算子正确性测试已通过。
+
+### 2026-03-15（天数 Iluvatar 服务器编译与测试验证通过）
+
+- **构建问题排查与修复**
+  - （√）xmake 自动检测 `/usr/local/corex/bin/nvcc` 并走标准 CUDA 工具链，完全绕过自定义 `iluvatar_cu` rule。
+    - 修复：改用 `on_build()` 完全手动控制编译，不再通过 `add_files("*.cu")` 注册 CUDA 文件，避免 xmake 注入 nvcc 工具链。
+  - （√）nvcc 工具链自动注入 `-lcudadevrt`，`on_load`/`before_link` 钩子均无法移除。
+    - 修复：iluvatar target 不注册任何 `.cu` 文件，xmake 不再检测到 CUDA 依赖。
+  - （√）静态库单遍扫描导致 `nvidia::` 符号未解析（`undefined symbol: swiglu`）。
+    - 修复：使用 `add_shflags("-Wl,--whole-archive", ...)` 强制完整包含 iluvatar 静态库。
+  - （√）`-lcudart` 链接顺序问题（排在 `.a` 文件之前被链接器跳过）。
+    - 修复：将 `-L`、`-Wl,-rpath` 和 `-lcudart` 统一放入 `add_shflags`，确保正确顺序。
+  - （√）Python `DeviceType` 枚举缺少 `ILUVATAR = 2`。
+    - 修复：`python/llaisys/libllaisys/llaisys_types.py` 新增 `ILUVATAR = 2`，`COUNT` 改为 `3`。
+
+- **服务器验证结果（天数 Iluvatar CoreX, ivcore10）**
+  - （√）`xmake f --iluvatar-gpu=y -c --root && xmake build --root`：编译通过。
+  - （√）`python3 test/test_runtime.py --device iluvatar`：通过（检测到 2 个 iluvatar 设备）。
+  - （√）`python3 test/ops_gpu/run_all.py --device iluvatar`：9 个算子全部通过（add/argmax/embedding/linear/rearrange/rms_norm/rope/self_attention/swiglu）。
+
+- **服务器环境备忘**
+  - CoreX SDK 路径：`/usr/local/corex` → `/usr/local/corex-3.2.1`（软链接）。
+  - 编译器：`/usr/local/corex/bin/clang++`（通过 `on_build` 手动调用）。
+  - Python 包路径需手动指定：`PYTHONPATH=python:/usr/local/corex-3.2.1/lib64/python3/dist-packages`。
+  - `libcudart.so` 位于 `/usr/local/corex-3.2.1/lib64/`（通过 `-Wl,-rpath` 嵌入）。
+
+- **项目 #2 状态更新**
+  - （√）NVIDIA 平台 ✅。
+  - （√）天数 Iluvatar CoreX 平台 ✅（编译 + 运行时 + 全部算子验证通过）。
 
 ---
 
