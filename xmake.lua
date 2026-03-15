@@ -152,16 +152,18 @@ target("llaisys")
         add_links("cudadevrt", "cudart")
         add_files("src/device/nvidia/devlink_stub.cu")
     elseif has_config("iluvatar-gpu") then
-        -- No .cu files in this target, no CUDA toolchain, just link cudart
-        add_linkdirs("/usr/local/corex/lib64")
-        add_links("cudart")
-        -- Force whole-archive for iluvatar static libs so all symbols are included
-        -- Use add_shflags for shared library linker flags
+        -- No .cu files in this target, no CUDA toolchain
+        -- Use add_shflags to control exact link order:
+        -- 1. whole-archive iluvatar static libs (defines nvidia:: symbols)
+        -- 2. -lcudart AFTER the .a files (so cudart symbols are resolved)
         add_shflags(
             "-Wl,--whole-archive",
             "build/linux/x86_64/release/libllaisys-ops-iluvatar.a",
             "build/linux/x86_64/release/libllaisys-device-iluvatar.a",
             "-Wl,--no-whole-archive",
+            "-L/usr/local/corex/lib64",
+            "-Wl,-rpath,/usr/local/corex/lib64",
+            "-lcudart",
             {force = true}
         )
     end
