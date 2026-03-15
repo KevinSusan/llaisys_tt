@@ -157,19 +157,43 @@ target("llaisys")
         add_links("cudart")
     end
 
-    -- Remove cudadevrt for iluvatar after all links are collected
-    on_load(function (target)
-        if has_config("iluvatar-gpu") then
-            local links = target:get("links") or {}
-            local filtered = {}
-            for _, link in ipairs(links) do
-                if link ~= "cudadevrt" then
-                    table.insert(filtered, link)
+    -- Remove cudadevrt for iluvatar: it does not exist on CoreX SDK
+    if has_config("iluvatar-gpu") then
+        before_link(function (target)
+            local links = target:get("links")
+            if links then
+                local filtered = {}
+                for _, link in ipairs(links) do
+                    if link ~= "cudadevrt" then
+                        table.insert(filtered, link)
+                    end
                 end
+                target:set("links", filtered)
             end
-            target:set("links", filtered)
-        end
-    end)
+            -- also remove from syslinks
+            local syslinks = target:get("syslinks")
+            if syslinks then
+                local filtered2 = {}
+                for _, link in ipairs(syslinks) do
+                    if link ~= "cudadevrt" then
+                        table.insert(filtered2, link)
+                    end
+                end
+                target:set("syslinks", filtered2)
+            end
+            -- remove from ldflags directly
+            local ldflags = target:get("ldflags")
+            if ldflags then
+                local filtered3 = {}
+                for _, flag in ipairs(ldflags) do
+                    if flag ~= "-lcudadevrt" then
+                        table.insert(filtered3, flag)
+                    end
+                end
+                target:set("ldflags", filtered3)
+            end
+        end)
+    end
 
     
     after_install(function (target)
