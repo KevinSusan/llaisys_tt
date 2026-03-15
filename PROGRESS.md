@@ -711,6 +711,8 @@
 - **项目 #2 状态更新**
   - （√）NVIDIA 平台 ✅。
   - （√）天数 Iluvatar CoreX 平台 ✅（编译 + 运行时 + 全部算子验证通过）。
+  - （√）天数 Iluvatar 端到端推理验证通过：`test/test_infer.py --device iluvatar --model ... --test`，Token 序列与 PyTorch 参考输出完全一致。
+  - （√）项目 #2 完成。
 
 ---
 
