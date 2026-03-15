@@ -156,7 +156,14 @@ target("llaisys")
         add_linkdirs("/usr/local/corex/lib64")
         add_links("cudart")
         -- Force whole-archive for iluvatar static libs so all symbols are included
-        add_ldflags("-Wl,--whole-archive", "-lllaisys-ops-iluvatar", "-lllaisys-device-iluvatar", "-Wl,--no-whole-archive", {force = true})
+        -- Use add_shflags for shared library linker flags
+        add_shflags(
+            "-Wl,--whole-archive",
+            "build/linux/x86_64/release/libllaisys-ops-iluvatar.a",
+            "build/linux/x86_64/release/libllaisys-device-iluvatar.a",
+            "-Wl,--no-whole-archive",
+            {force = true}
+        )
     end
 
     
