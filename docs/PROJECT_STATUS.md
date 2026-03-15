@@ -1,6 +1,6 @@
 # LLAISYS 项目进度总览
 
-> 更新日期：2026-03-14（第二次更新）
+> 更新日期：2026-03-15（第三次更新）
 > 分支：server
 
 ---
@@ -31,9 +31,10 @@
 
 ### 宏观
 
-本项目要求在 Nvidia、天数、摩尔、沐曦四个 CUDA 或类 CUDA 平台中，至少适配两个。当前仅完成了 Nvidia CUDA 平台的适配：GPU 运行时、全部 9 个算子的 CUDA kernel、设备抽象层均已实现并测试通过。
+本项目要求在 Nvidia、天数、摩尔、沐曦四个 CUDA 或类 CUDA 平台中，至少适配两个。当前已完成 Nvidia CUDA 和天数 Iluvatar CoreX 两个平台的适配，满足"至少两个"的要求。
 
-缺失的大能力：尚未适配第二个平台（天数/摩尔/沐曦），因此本项目实际只完成了一半。此外，GPU 端到端推理的系���级回归测试（长会话、多会话、packed batch）尚未完成。
+- **Nvidia CUDA**：GPU 运行时、全部 9 个算子的 CUDA kernel、设备抽象层均已实现并测试通过。
+- **天数 Iluvatar CoreX**：采用 kernel 零复制策略（CoreX SDK 完全兼容 CUDA API），iluvatar 的 dispatch 直接调用 `nvidia::` namespace 下的实现，kernel 代码无需修改。编译使用 `/usr/local/corex/bin/clang++ -x cuda --cuda-gpu-arch=ivcore10`，通过 xmake `on_build()` 完全绕过 xmake 内置 CUDA 工具链检测。已在天数服务器上完成编译验证和全部算子正确性测试。
 
 ### 微观
 
@@ -43,9 +44,14 @@
 | Nvidia GPU 算子 | ✅ 完成 | 9 个算子全部有 CUDA 实现，`src/ops/*/nvidia/*.cu` |
 | Nvidia GPU 算子测试 | ✅ 通过 | `test/ops_gpu/` 全量通过 |
 | Nvidia GPU 运行时测试 | ✅ 通过 | `test/test_runtime.py --device nvidia` |
-| 设备抽象层 | ✅ 完成 | `llaisysDeviceType_t` 参数透传，CPU/GPU 自动切换 |
+| 设备抽象层 | ✅ 完成 | `llaisysDeviceType_t` 参数透传，CPU/Nvidia/Iluvatar 自动切换 |
 | xmake CUDA 构建 | ✅ 完成 | `xmake/nvidia.lua`，`--nv-gpu=y` 开关 |
-| 天数平台适配 | ❌ 未实现 | — |
+| 天数 Iluvatar 运行时 | ✅ 完成 | `src/device/iluvatar/`（从 nvidia 复制改 namespace） |
+| 天数 Iluvatar 算子 | ✅ 完成 | kernel 零复制，dispatch 调用 `nvidia::` 实现 |
+| 天数 Iluvatar 构建 | ✅ 完成 | `xmake/iluvatar.lua`，`--iluvatar-gpu=y` 开关，`on_build()` + `clang++` |
+| 天数 Iluvatar 运行时测试 | ✅ 通过 | `test/test_runtime.py --device iluvatar`（检测到 2 个设备） |
+| 天数 Iluvatar 算子测试 | ✅ 通过 | `test/ops_gpu/run_all.py --device iluvatar`（9 个算子全部通过） |
+| Python DeviceType 枚举 | ✅ 完成 | `CPU=0, NVIDIA=1, ILUVATAR=2` |
 | 摩尔平台适配 | ❌ 未实现 | — |
 | 沐曦平台适配 | ❌ 未实现 | — |
 | GPU 端到端推理回归 | ⚠️ 未完成 | 需模型文件，长会话/多会话压测未做 |
@@ -192,7 +198,7 @@
 | 项目 | 完成度 | 状态 |
 |------|--------|------|
 | #1 优化 CPU 推理 | ░░░░░░░░░░░░░░░░░░░░ 0% | ❌ 未开始（算子功能已有，性能优化未做） |
-| #2 多平台 CUDA 适配 | ██████████░░░░░░░░░░ 50% | ⚠️ 仅完成 Nvidia，需再适配一个平台 |
+| #2 多平台 CUDA 适配 | ██████████████████░░ 90% | ✅ Nvidia + 天数 Iluvatar 已完成，满足至少两个平台要求 |
 | #3 AI 聊天机器人 | ██████████████████░░ 90% | ✅ 核心功能完成 |
 | #4 多用户推理服务 | ███████████████████░ 95% | ✅ 核心功能完成，缺公平性调度 |
 | #5 分布式推理 | ░░░░░░░░░░░░░░░░░░░░ 0% | ❌ 未开始 |
