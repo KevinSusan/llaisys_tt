@@ -152,47 +152,9 @@ target("llaisys")
         add_links("cudadevrt", "cudart")
         add_files("src/device/nvidia/devlink_stub.cu")
     elseif has_config("iluvatar-gpu") then
-        set_policy("build.cuda.devlink", false)
+        -- No .cu files in this target, no CUDA toolchain, just link cudart
         add_linkdirs("/usr/local/corex/lib64")
         add_links("cudart")
-    end
-
-    -- Remove cudadevrt for iluvatar: it does not exist on CoreX SDK
-    if has_config("iluvatar-gpu") then
-        before_link(function (target)
-            local links = target:get("links")
-            if links then
-                local filtered = {}
-                for _, link in ipairs(links) do
-                    if link ~= "cudadevrt" then
-                        table.insert(filtered, link)
-                    end
-                end
-                target:set("links", filtered)
-            end
-            -- also remove from syslinks
-            local syslinks = target:get("syslinks")
-            if syslinks then
-                local filtered2 = {}
-                for _, link in ipairs(syslinks) do
-                    if link ~= "cudadevrt" then
-                        table.insert(filtered2, link)
-                    end
-                end
-                target:set("syslinks", filtered2)
-            end
-            -- remove from ldflags directly
-            local ldflags = target:get("ldflags")
-            if ldflags then
-                local filtered3 = {}
-                for _, flag in ipairs(ldflags) do
-                    if flag ~= "-lcudadevrt" then
-                        table.insert(filtered3, flag)
-                    end
-                end
-                target:set("ldflags", filtered3)
-            end
-        end)
     end
 
     
