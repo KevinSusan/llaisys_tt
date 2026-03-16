@@ -199,11 +199,13 @@ def main():
     print(f"[rank {rank}] prefill next_token={next_token} eos={end_token}", file=sys.stderr)
 
     generated = list(input_ids)
-    for _ in range(max_tokens):
+    for step in range(max_tokens):
         if next_token < 0 or next_token == end_token:
-            print(f"[rank {rank}] stopping: next_token={next_token}", file=sys.stderr)
+            print(f"[rank {rank}] stopping at step {step}: next_token={next_token}", file=sys.stderr)
             break
         generated.append(next_token)
+        print(f"[rank {rank}] step {step} token={next_token}", file=sys.stderr)
+        sys.stderr.flush()
         tb = (ctypes.c_int64 * 1)(next_token)
         next_token = int(LIB_LLAISYS.llaisysQwen2ModelStepSampling(
             model, tb, ctypes.c_size_t(1), ctypes.byref(params),
