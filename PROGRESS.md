@@ -714,6 +714,79 @@
   - （√）天数 Iluvatar 端到端推理验证通过：`test/test_infer.py --device iluvatar --model ... --test`，Token 序列与 PyTorch 参考输出完全一致。
   - （√）项目 #2 完成。
 
+### 2026-03-16（项目 #5：通信层初步实现与审查）
+
+- **通信层架构设计（architect 主导）**
+  - （√）设计通信抽象层，遵循与运行时 API 相同的函数指针表模式。
+  - （√）C API 头文件 `include/llaisys/comm.h`：定义 `LlaisysCommAPI` 结构体（8 个函数指针）、`llaisysCommBackend_t`（NCCL/IXCCL/MPI）、`llaisysReduceOp_t`（SUM/PROD/MIN/MAX）。
+  - （√）C++ dispatcher `src/device/comm_api.{hpp,cpp}`：后端分发 + unsupported 默认实现。
+  - （√）设计文档 `docs/comm_design.md`。
+
+- **NCCL 后端实现（backend 主导）**
+  - （√）`src/device/nvidia/nvidia_comm.cu`：实现全部 8 个通信操作（init/destroy/rank/size/allreduce/broadcast/send/recv）。
+  - （√）`xmake/nvidia.lua`：添加 `nccl` 链接和 `nvidia_comm.cu` 源文件。
+
+- **测试（qa 主导）**
+  - （√）`test/test_comm_api.py`：单 GPU 单元测试（init/destroy、rank/size、allreduce SUM），通过 ctypes 调用 C API。
+  - （√）`test/test_allreduce.py` + `test/_allreduce_worker.py`：多进程集成测试，文件 IPC 广播 NCCL unique ID，验证多 rank allreduce SUM 正确性。
+
+- **代码审查发现的问题（reviewer 主导）**
+  - （！）**编译阻塞 #1**：`nvidia_comm.cu` 的 `to_nccl_dtype` 使用了未定义的枚举名（`LLAISYS_FLOAT32` 等），正确名称应为 `LLAISYS_DTYPE_F32`/`LLAISYS_DTYPE_F16`/`LLAISYS_DTYPE_BF16`/`LLAISYS_DTYPE_I32`/`LLAISYS_DTYPE_I8`。
+  - （！）**编译阻塞 #2**：缺少 `src/llaisys/comm.cc` 导出文件，`llaisysGetCommAPI` 在 `comm.h` 中声明但无实现，共享库不导出该符号。
+  - （！）**编译阻塞 #3**：`comm_api.cpp` dispatcher 无条件调用 `nccl::getCommAPI()`/`ixccl::getCommAPI()`/`mpi::getCommAPI()`，缺少 `#ifdef` 守卫（对比 `runtime_api.cpp` 的做法）。`comm_api.hpp` 同理。
+  - （？）**功能缺口**：`commInit` 中 NCCL unique ID 仅在 rank 0 生成，无广播机制，多 rank 场景无法使用。集成测试通过直接调用 NCCL 库绕过了此问题。
+  - （？）**测试覆盖**：broadcast/send/recv 未测试。
+
+- **编译阻塞修复（team-lead 主导）**
+  - （√）修复 `nvidia_comm.cu` 数据类型枚举名（`LLAISYS_FLOAT32` → `LLAISYS_DTYPE_F32` 等）。
+  - （√）新增 `src/llaisys/comm.cc`（参照 `runtime.cc`），导出 `llaisysGetCommAPI`。
+  - （√）为 `comm_api.{hpp,cpp}` 添加 `#ifdef ENABLE_NVIDIA_API` / `ENABLE_ILUVATAR_API` 条件编译守卫，MPI 暂返回 unsupported。
+
+- **下一步**
+  - （？）在 Nvidia 服务器上编译验证通信层。
+  - （√）设计 `commInit` 的 unique ID 广播方案（或改为接受外部传入的 ID）。
+  - （√）实现模型权重切分与 Decoder 中 AllReduce 插入。
+
+### 2026-03-16（项目 #5：张量并行 - commInit 修复 + AllReduce + 权重切分 + 启动器）
+
+- **commInit 外部 unique ID 支持（architect 主导）**
+  - （√）`commInit` 已支持接受外部传入的 unique ID（第 4 个参数 `const void *unique_id`）。
+  - （√）当 `unique_id` 非空时直接使用，为空时 rank 0 自动生成。
+  - （√）新增 `llaisysCommGenerateUniqueId` C API，支持外部生成 unique ID。
+
+- **Decoder AllReduce 插入（backend 主导）**
+  - （√）`decoder.hpp`：新增 `setTensorParallel(comm, stream, tp_size)` 方法和 `_comm`/`_comm_stream`/`_tp_size` 成员。
+  - （√）`decoder.cpp`：在 `attn_o` 线性投影后、残差加之前插入 AllReduce（SUM）。
+  - （√）`decoder.cpp`：在 `mlp_down` 线性投影后、残差加之前插入 AllReduce（SUM）。
+  - （√）AllReduce 仅在 `_tp_size > 1 && _comm` 时执行，单 GPU 零开销。
+  - （√）自动根据设备类型选择通信后端（NVIDIA→NCCL，Iluvatar→IXCCL）。
+
+- **模型层 TP 接口透传**
+  - （√）`qwen2.hpp/cpp`：新增 `setTensorParallel()` 方法，委托给 `_decoder`。
+  - （√）`qwen2.h`：新增 `llaisysQwen2ModelSetTensorParallel` C API。
+  - （√）`src/llaisys/models/qwen2.cpp`：实现 C API 导出。
+  - （√）`models.py`：新增 ctypes 绑定（`hasattr` 保护兼容旧 DLL）。
+
+- **Python 权重切分（python-dev 主导）**
+  - （√）新增 `python/llaisys/tensor_parallel.py`：Megatron-style 权重切分。
+  - （√）Column split（dim 0）：Q/K/V 权重+偏置、gate、up。
+  - （√）Row split（dim 1）：attn_o、down。
+  - （√）Replicate：embeddings、norms、lm_head。
+
+- **多进程启动器（python-dev 主导）**
+  - （√）`scripts/launch_tp.py`：Rank 0 生成 NCCL unique ID，写入临时文件，启动 N 个子进程。
+  - （√）`scripts/_tp_worker.py`：读取 unique ID，初始化通信，加载切分权重，调用 `SetTensorParallel`，执行推理。
+  - （√）支持 `--model`、`--nranks`、`--device`、`--prompt`、`--max-tokens` 参数。
+
+- **审查修复（reviewer 主导）**
+  - （√）`_tp_worker.py` 缺少 `SetTensorParallel` 调用 → 已补充。
+  - （√）`models.py` 缺少 `SetTensorParallel` ctypes 绑定 → 已补充。
+
+- **下一步**
+  - （？）在 Nvidia 服务器上编译并端到端验证 2-GPU 张量并行推理。
+  - （？）补充 TP 自动化测试。
+  - （？）考虑流水线并行和多机协调。
+
 ---
 
 ### 使用约定

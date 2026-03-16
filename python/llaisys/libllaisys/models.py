@@ -1,6 +1,6 @@
-from ctypes import Structure, POINTER, c_size_t, c_int, c_float, c_int64, c_uint32, c_void_p, c_int32
+from ctypes import Structure, POINTER, CFUNCTYPE, c_size_t, c_int, c_float, c_int64, c_uint32, c_void_p, c_int32
 
-from .llaisys_types import llaisysDeviceType_t, llaisysDataType_t
+from .llaisys_types import llaisysDeviceType_t, llaisysDataType_t, llaisysStream_t
 from .tensor import llaisysTensor_t
 
 
@@ -220,6 +220,56 @@ def load_models(lib):
     lib.llaisysQwen2ModelExportKVContext.argtypes = [LlaisysQwen2Model, LlaisysQwen2KVContext, c_size_t]
     lib.llaisysQwen2ModelExportKVContext.restype = c_int32
 
+    if hasattr(lib, "llaisysQwen2ModelSetTensorParallel"):
+        lib.llaisysQwen2ModelSetTensorParallel.argtypes = [LlaisysQwen2Model, c_void_p, c_void_p, c_int]
+        lib.llaisysQwen2ModelSetTensorParallel.restype = c_int32
+
+
+# --- Comm API ctypes ---
+
+llaisysComm_t = c_void_p
+
+LLAISYS_COMM_UNIQUE_ID_MAX_SIZE = 128
+
+comm_init_api = CFUNCTYPE(c_int, POINTER(llaisysComm_t), c_int, c_int, c_void_p)
+comm_destroy_api = CFUNCTYPE(None, llaisysComm_t)
+comm_get_rank_api = CFUNCTYPE(c_int, llaisysComm_t)
+comm_get_size_api = CFUNCTYPE(c_int, llaisysComm_t)
+comm_allreduce_api = CFUNCTYPE(
+    None, c_void_p, c_void_p, c_size_t, c_int, c_int, llaisysComm_t, llaisysStream_t,
+)
+comm_broadcast_api = CFUNCTYPE(
+    None, c_void_p, c_size_t, c_int, c_int, llaisysComm_t, llaisysStream_t,
+)
+comm_send_api = CFUNCTYPE(
+    None, c_void_p, c_size_t, c_int, c_int, llaisysComm_t, llaisysStream_t,
+)
+comm_recv_api = CFUNCTYPE(
+    None, c_void_p, c_size_t, c_int, c_int, llaisysComm_t, llaisysStream_t,
+)
+
+
+class LlaisysCommAPI(Structure):
+    _fields_ = [
+        ("init", comm_init_api),
+        ("destroy", comm_destroy_api),
+        ("get_rank", comm_get_rank_api),
+        ("get_size", comm_get_size_api),
+        ("allreduce", comm_allreduce_api),
+        ("broadcast", comm_broadcast_api),
+        ("send", comm_send_api),
+        ("recv", comm_recv_api),
+    ]
+
+
+def load_comm(lib):
+    if hasattr(lib, "llaisysGetCommAPI"):
+        lib.llaisysGetCommAPI.argtypes = [c_int]
+        lib.llaisysGetCommAPI.restype = POINTER(LlaisysCommAPI)
+    if hasattr(lib, "llaisysCommGenerateUniqueId"):
+        lib.llaisysCommGenerateUniqueId.argtypes = [c_int, c_void_p, POINTER(c_size_t)]
+        lib.llaisysCommGenerateUniqueId.restype = c_int
+
 
 __all__ = [
     "LlaisysQwen2Meta",
@@ -230,4 +280,8 @@ __all__ = [
     "LlaisysQwen2KVBlock",
     "LlaisysQwen2KVContext",
     "load_models",
+    "LlaisysCommAPI",
+    "llaisysComm_t",
+    "LLAISYS_COMM_UNIQUE_ID_MAX_SIZE",
+    "load_comm",
 ]

@@ -34,6 +34,7 @@ public:
     int64_t stepSampling(const int64_t *token_ids, size_t ntoken, const LlaisysSamplingParams *params);
     void resetKVCache();
     void setKVCacheEnabled(bool enabled);
+    void setTensorParallel(llaisysComm_t comm, llaisysStream_t stream, int tp_size);
     void setKVContext(void *ctx, size_t past_len_tokens = 0);
     void *getKVContext() const;
     int exportKVContext(void *ctx, size_t block_tokens);

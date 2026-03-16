@@ -1,6 +1,6 @@
 # LLAISYS 项目进度总览
 
-> 更新日期：2026-03-15（第三次更新）
+> 更新日期：2026-03-16（第四次更新）
 > 分支：server
 
 ---
@@ -159,15 +159,35 @@
 
 ### 宏观
 
-未开始。本项目要求引入张量并行，将模型分片到多个设备上实现分布式推理。Nvidia GPU 需支持 NCCL，CPU 需支持 MPI。当前无通信层实现，无法支持多机多卡推理。张量层架构预留了通信模块的位置（运行时 + 通信 + 算子），但尚未填充。
+通信层与张量并行基础实现已完成。已设计并实现通信抽象层（C API + C++ dispatcher + NCCL 后端），遵循与运行时 API 相同的函数指针表模式。支持 init/destroy、rank/size 查询、allreduce、broadcast、send/recv 共 8 个操作。NCCL 后端已实现全部操作，构建脚本已集成。编译阻塞问题已全部修复。
+
+张量并行（Megatron-style）已实现：
+- `commInit` 支持外部传入 NCCL unique ID，解决多 rank 初始化问题
+- Decoder 前向中在 `attn_o` 和 `mlp_down` 投影后、残差加之前插入 AllReduce（SUM），单 GPU 零开销
+- Python 权重切分模块：Q/K/V/gate/up 列切分，attn_o/down 行切分，embeddings/norms 复制
+- 多进程启动器：rank 0 生成 unique ID 通过文件 IPC 广播，每 rank 加载切分权重并执行推理
+
+当前状态：代码已就位，待在 Nvidia 多 GPU 服务器上端到端验证。流水线并行、多机协调尚未开始。
 
 ### 微观
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| 通信层（NCCL） | ❌ 未实现 | — |
+| 通信层 C API | ✅ 完成 | `include/llaisys/comm.h`，函数指针表 + 枚举 |
+| 通信层 C++ dispatcher | ✅ 完成 | `src/device/comm_api.{hpp,cpp}`，含 `#ifdef` 守卫 |
+| 通信层 C 导出 | ✅ 完成 | `src/llaisys/comm.cc` |
+| NCCL 后端 | ✅ 完成 | `src/device/nvidia/nvidia_comm.cu`，8 个操作 |
+| NCCL 构建集成 | ✅ 完成 | `xmake/nvidia.lua` 已添加 `nccl` 链接和源文件 |
+| 通信层设计文档 | ✅ 完成 | `docs/comm_design.md` |
+| 单元测试 | ✅ 完成 | `test/test_comm_api.py`（init/destroy/rank/size/allreduce） |
+| 集成测试 | ✅ 完成 | `test/test_allreduce.py`（多进程 allreduce，文件 IPC） |
+| commInit 外部 ID | ✅ 完成 | `commInit` 接受外部 unique ID + `CommGenerateUniqueId` API |
+| Decoder AllReduce | ✅ 完成 | `attn_o` 后 + `mlp_down` 后，`tp_size > 1` 时执行 |
+| 模型 TP 接口 | ✅ 完成 | `SetTensorParallel` C API + ctypes 绑定 |
+| 权重切分 | ✅ 完成 | `python/llaisys/tensor_parallel.py`（Megatron-style） |
+| 多进程启动器 | ✅ 完成 | `scripts/launch_tp.py` + `scripts/_tp_worker.py` |
+| 多 GPU 端到端验证 | ❌ 待验证 | 需在 Nvidia 服务器上测试 |
 | 通信层（MPI） | ❌ 未实现 | — |
-| 张量并行 | ❌ 未实现 | 模型分片策略未设计 |
 | 流水线并行 | ❌ 未实现 | — |
 | 多机协调 | ❌ 未实现 | — |
 
@@ -201,7 +221,7 @@
 | #2 多平台 CUDA 适配 | ████████████████████ 100% | ✅ Nvidia + 天数 Iluvatar 完成，端到端推理验证通过 |
 | #3 AI 聊天机器人 | ██████████████████░░ 90% | ✅ 核心功能完成 |
 | #4 多用户推理服务 | ███████████████████░ 95% | ✅ 核心功能完成，缺公平性调度 |
-| #5 分布式推理 | ░░░░░░░░░░░░░░░░░░░░ 0% | ❌ 未开始 |
+| #5 分布式推理 | ██████░░░░░░░░░░░░░░ 30% | ⚠️ 通信层+张量并行代码就位，待多 GPU 端到端验证 |
 | #6 支持新模型 | ░░░░░░░░░░░░░░░░░░░░ 0% | ❌ 未开始 |
 
 ---
@@ -214,4 +234,5 @@
 | `docs/FIX_DESIGN.md` | 6 个代码审查问题的修复设计方案 |
 | `docs/CHATSERVICE_SPLIT_DESIGN.md` | ChatService 职责拆分设计方案 |
 | `docs/SAMPLING_BATCH_DESIGN.md` | 采样请求批量路径设计方案 |
+| `docs/comm_design.md` | 通信层架构设计文档 |
 | `PROGRESS.md` | 开发进度详细日志 |

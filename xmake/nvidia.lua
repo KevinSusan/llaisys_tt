@@ -13,8 +13,10 @@ target("llaisys-device-nvidia")
     end
     add_links("cudart")
     add_links("cudadevrt")
+    add_links("nccl")
     add_files("../src/device/nvidia/nvidia_runtime_api.cu")
     add_files("../src/device/nvidia/nvidia_resource.cu")
+    add_files("../src/device/nvidia/nvidia_comm.cu")
     on_install(function (target) end)
 target_end()
 

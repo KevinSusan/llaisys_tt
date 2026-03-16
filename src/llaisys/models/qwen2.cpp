@@ -281,6 +281,15 @@ __C {
 		model->impl->setKVCacheEnabled(enabled != 0);
 	}
 
+	__export int32_t llaisysQwen2ModelSetTensorParallel(struct LlaisysQwen2Model *model,
+	                                                    llaisysComm_t comm,
+	                                                    llaisysStream_t stream,
+	                                                    int tp_size) {
+		if (!model || !model->impl) return -1;
+		model->impl->setTensorParallel(comm, stream, tp_size);
+		return 0;
+	}
+
 	__export struct LlaisysQwen2KVBlock *llaisysQwen2KVBlockCreate(
 		const struct LlaisysQwen2KVBlockMeta *meta,
 		llaisysDeviceType_t device,

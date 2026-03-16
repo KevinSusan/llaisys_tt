@@ -2,6 +2,7 @@
 #define LLAISYS_MODELS_QWEN2_H
 
 #include "../tensor.h"
+#include "../comm.h"
 
 __C {
     //千问2模型元信息
@@ -120,6 +121,12 @@ __C {
 
     //启用/禁用 KV-cache
     __export void llaisysQwen2ModelSetKVCacheEnabled(struct LlaisysQwen2Model * model, uint8_t enabled);
+
+    //设置张量并行参数
+    __export int32_t llaisysQwen2ModelSetTensorParallel(struct LlaisysQwen2Model *model,
+                                                        llaisysComm_t comm,
+                                                        llaisysStream_t stream,
+                                                        int tp_size);
 
     // ===== Experimental KV block/context APIs =====
     __export struct LlaisysQwen2KVBlock *llaisysQwen2KVBlockCreate(

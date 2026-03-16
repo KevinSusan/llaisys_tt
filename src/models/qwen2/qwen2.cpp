@@ -52,6 +52,10 @@ void Qwen2::setKVCacheEnabled(bool enabled) {
     _decoder.setKVCacheEnabled(enabled);
 }
 
+void Qwen2::setTensorParallel(llaisysComm_t comm, llaisysStream_t stream, int tp_size) {
+    _decoder.setTensorParallel(comm, stream, tp_size);
+}
+
 void Qwen2::setKVContext(void *ctx, size_t past_len_tokens) {
     clearPackedState();
     _kv_ctx = ctx;

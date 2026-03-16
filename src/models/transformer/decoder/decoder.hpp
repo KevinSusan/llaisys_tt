@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llaisys/models/qwen2.h"
+#include "llaisys/comm.h"
 #include "llaisys/tensor.h"
 
 #include <cstddef>
@@ -57,6 +58,8 @@ public:
     bool hasExternalKVContext() const;
     int exportKVContext(void *ctx, size_t block_tokens);
 
+    void setTensorParallel(llaisysComm_t comm, llaisysStream_t stream, int tp_size);
+
 private:
     bool recoverExternalCache();
     bool runHidden(const int64_t *token_ids,
@@ -84,6 +87,9 @@ private:
     void *_external_kv_ctx{nullptr};
     size_t _external_past_len{0};
     bool _external_cache_ready{false};
+    llaisysComm_t _comm{nullptr};
+    llaisysStream_t _comm_stream{nullptr};
+    int _tp_size{1};
 };
 
 } // namespace llaisys::models::transformer

@@ -12,7 +12,7 @@ from .llaisys_types import llaisysStream_t
 from .tensor import llaisysTensor_t
 from .tensor import load_tensor
 from .ops import load_ops
-from .models import load_models
+from .models import load_models, load_comm
 from .models import (
     LlaisysQwen2Meta,
     LlaisysQwen2Weights,
@@ -21,6 +21,9 @@ from .models import (
     LlaisysQwen2KVBlockMeta,
     LlaisysQwen2KVBlock,
     LlaisysQwen2KVContext,
+    LlaisysCommAPI,
+    llaisysComm_t,
+    LLAISYS_COMM_UNIQUE_ID_MAX_SIZE,
 )
 from .tokenizer import load_tokenizer, LlaisysTokenizer
 
@@ -50,6 +53,7 @@ load_runtime(LIB_LLAISYS)
 load_tensor(LIB_LLAISYS)
 load_ops(LIB_LLAISYS)
 load_models(LIB_LLAISYS)
+load_comm(LIB_LLAISYS)
 load_tokenizer(LIB_LLAISYS)
 
 
@@ -72,5 +76,8 @@ __all__ = [
     "LlaisysQwen2KVBlockMeta",
     "LlaisysQwen2KVBlock",
     "LlaisysQwen2KVContext",
+    "LlaisysCommAPI",
+    "llaisysComm_t",
+    "LLAISYS_COMM_UNIQUE_ID_MAX_SIZE",
     "LlaisysTokenizer",
 ]

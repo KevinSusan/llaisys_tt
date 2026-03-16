@@ -1,5 +1,6 @@
 #include "decoder.hpp"
 #include "../../../llaisys/models/qwen2_kv_internal.hpp"
+#include "../../../device/comm_api.hpp"
 
 #include "llaisys/ops.h"
 
@@ -66,6 +67,12 @@ Decoder::Decoder(const DecoderConfig &config,
       _weights(weights),
       _device(device),
       _device_ids(device_ids) {}
+
+void Decoder::setTensorParallel(llaisysComm_t comm, llaisysStream_t stream, int tp_size) {
+    _comm = comm;
+    _comm_stream = stream;
+    _tp_size = tp_size > 0 ? tp_size : 1;
+}
 
 Decoder::~Decoder() {
     releaseCache();
@@ -580,6 +587,19 @@ bool Decoder::runHidden(const int64_t *token_ids,
         }
         ::llaisysLinear(proj_out, attn_out2d, _weights->attn_o_w[layer], nullptr);
 
+        // Tensor parallel: allreduce after attn_o projection
+        if (_tp_size > 1 && _comm) {
+            size_t ndim = tensorGetNdim(proj_out);
+            size_t shape[4];
+            tensorGetShape(proj_out, shape);
+            size_t count = 1;
+            for (size_t d = 0; d < ndim; ++d) count *= shape[d];
+            auto backend = (_device == LLAISYS_DEVICE_ILUVATAR) ? LLAISYS_COMM_IXCCL : LLAISYS_COMM_NCCL;
+            auto *api = llaisys::device::getCommAPI(backend);
+            api->allreduce(tensorGetData(proj_out), tensorGetData(proj_out),
+                           count, _config.dtype, LLAISYS_REDUCE_SUM, _comm, _comm_stream);
+        }
+
         trace("attn.residual");
         llaisysTensor_t new_hidden = tensorCreate(hidden_shape, 2, _config.dtype, _device, device_id);
         if (!require_tensor(new_hidden, "attn.residual")) {
@@ -686,6 +706,19 @@ bool Decoder::runHidden(const int64_t *token_ids,
             return false;
         }
         ::llaisysLinear(mlp_out, swiglu, _weights->mlp_down_w[layer], nullptr);
+
+        // Tensor parallel: allreduce after mlp_down projection
+        if (_tp_size > 1 && _comm) {
+            size_t ndim = tensorGetNdim(mlp_out);
+            size_t shape[4];
+            tensorGetShape(mlp_out, shape);
+            size_t count = 1;
+            for (size_t d = 0; d < ndim; ++d) count *= shape[d];
+            auto backend = (_device == LLAISYS_DEVICE_ILUVATAR) ? LLAISYS_COMM_IXCCL : LLAISYS_COMM_NCCL;
+            auto *api = llaisys::device::getCommAPI(backend);
+            api->allreduce(tensorGetData(mlp_out), tensorGetData(mlp_out),
+                           count, _config.dtype, LLAISYS_REDUCE_SUM, _comm, _comm_stream);
+        }
 
         trace("mlp.residual");
         llaisysTensor_t mlp_hidden = tensorCreate(hidden_shape, 2, _config.dtype, _device, device_id);
