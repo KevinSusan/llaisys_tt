@@ -9,7 +9,7 @@ target("llaisys-device-nvidia")
     end
     if not is_plat("windows") then
         add_cxflags("-fPIC", "-Wno-unknown-pragmas")
-        add_cuflags("-rdc=true")
+        add_cuflags("-rdc=true", "--compiler-options=-fPIC")
     end
     add_links("cudart")
     add_links("cudadevrt")
@@ -31,7 +31,7 @@ target("llaisys-ops-nvidia")
     end
     if not is_plat("windows") then
         add_cxflags("-fPIC", "-Wno-unknown-pragmas")
-        add_cuflags("-rdc=true")
+        add_cuflags("-rdc=true", "--compiler-options=-fPIC")
     end
     add_links("cudart")
     add_links("cudadevrt")
