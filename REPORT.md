@@ -162,8 +162,8 @@ llaisys/
 ### 步骤 0：克隆仓库 + 下载模型
 
 ```bash
-git clone https://github.com/KevinSusan/llaisys-ttt.git
-cd llaisys-ttt
+git clone https://github.com/KevinSusan/llaisys_tt.git
+cd llaisys_tt
 
 # 下载测试模型 DeepSeek-R1-Distill-Qwen-1.5B（约 3GB）
 pip install huggingface_hub
