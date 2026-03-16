@@ -163,7 +163,7 @@ llaisys/
 
 ```bash
 git clone https://github.com/KevinSusan/llaisys-ttt.git
-cd llaisys-ttt && git checkout server
+cd llaisys-ttt
 
 # 下载测试模型 DeepSeek-R1-Distill-Qwen-1.5B（约 3GB）
 pip install huggingface_hub
