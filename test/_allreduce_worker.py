@@ -57,10 +57,16 @@ def get_nccl_unique_id():
         nccl = ctypes.CDLL("libnccl.so.2")
     except OSError:
         nccl = ctypes.CDLL("libnccl.so")
-    uid = ctypes.create_string_buffer(NCCL_UNIQUE_ID_BYTES)
-    ret = nccl.ncclGetUniqueId(uid)
+    nccl.ncclGetUniqueId.argtypes = [ctypes.POINTER(NcclUniqueId)]
+    nccl.ncclGetUniqueId.restype = ctypes.c_int
+    uid = NcclUniqueId()
+    ret = nccl.ncclGetUniqueId(ctypes.byref(uid))
     assert ret == 0, f"ncclGetUniqueId failed: {ret}"
-    return uid.raw
+    return bytes(uid.internal)
+
+
+class NcclUniqueId(ctypes.Structure):
+    _fields_ = [("internal", ctypes.c_byte * NCCL_UNIQUE_ID_BYTES)]
 
 
 def nccl_comm_init_rank(nranks, uid_bytes, rank):
@@ -69,8 +75,11 @@ def nccl_comm_init_rank(nranks, uid_bytes, rank):
         nccl = ctypes.CDLL("libnccl.so.2")
     except OSError:
         nccl = ctypes.CDLL("libnccl.so")
+    nccl.ncclCommInitRank.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, NcclUniqueId, ctypes.c_int]
+    nccl.ncclCommInitRank.restype = ctypes.c_int
     comm = ctypes.c_void_p()
-    uid = ctypes.create_string_buffer(uid_bytes, NCCL_UNIQUE_ID_BYTES)
+    uid = NcclUniqueId()
+    ctypes.memmove(uid.internal, uid_bytes, NCCL_UNIQUE_ID_BYTES)
     ret = nccl.ncclCommInitRank(ctypes.byref(comm), nranks, uid, rank)
     assert ret == 0, f"ncclCommInitRank failed: {ret}"
     return comm
