@@ -61,14 +61,9 @@ def main():
     if ret != 0:
         raise RuntimeError(f"commInit failed: {ret}")
 
-    # Load tokenizer
-    from llaisys.libllaisys import LlaisysTokenizer
-    tokenizer_path = model_path / "tokenizer.json"
-    if not tokenizer_path.exists():
-        candidates = list(model_path.rglob("tokenizer.json"))
-        if candidates:
-            tokenizer_path = candidates[0]
-    tok = LIB_LLAISYS.llaisysTokenizerCreate(str(tokenizer_path).encode())
+    # Load tokenizer (use transformers for HF tokenizer.json)
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
 
     # Tokenize prompt
     import json
@@ -191,15 +186,7 @@ def main():
         w.out_embed = w.in_embed
 
     # Tokenize and run inference
-    prompt_encoded = prompt.encode("utf-8")
-    max_len = len(prompt_encoded) * 4 + 256
-    out_ids = (ctypes.c_int64 * max_len)()
-    out_len = ctypes.c_size_t(0)
-    LIB_LLAISYS.llaisysTokenizerEncode(
-        tok, prompt_encoded, ctypes.c_size_t(len(prompt_encoded)),
-        out_ids, ctypes.c_size_t(max_len), ctypes.byref(out_len),
-    )
-    input_ids = [int(out_ids[i]) for i in range(out_len.value)]
+    input_ids = tok.encode(prompt, add_special_tokens=True)
 
     # Prefill + decode
     token_buf = (ctypes.c_int64 * len(input_ids))(*input_ids)
@@ -220,14 +207,8 @@ def main():
 
     # Decode and print from rank 0
     if rank == 0:
-        dec_buf = ctypes.create_string_buffer(len(generated) * 32)
-        dec_len = ctypes.c_size_t(0)
-        gen_ids = (ctypes.c_int64 * len(generated))(*generated)
-        LIB_LLAISYS.llaisysTokenizerDecode(
-            tok, gen_ids, ctypes.c_size_t(len(generated)),
-            dec_buf, ctypes.c_size_t(len(dec_buf)), ctypes.byref(dec_len),
-        )
-        print(dec_buf.value[:dec_len.value].decode("utf-8", errors="replace"))
+        output_text = tok.decode(generated, skip_special_tokens=True)
+        print(output_text)
 
     # Cleanup
     LIB_LLAISYS.llaisysQwen2ModelDestroy(model)
