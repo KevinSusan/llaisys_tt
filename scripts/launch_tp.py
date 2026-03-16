@@ -71,7 +71,7 @@ def main():
             [sys.executable, worker],
             env=env,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=None,
         )
         procs.append((rank, proc))
 
