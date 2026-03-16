@@ -540,7 +540,7 @@ bool Decoder::runHidden(const int64_t *token_ids,
         if (v_cache_view) tensorDestroy(v_cache_view);
 
         trace("attn.proj");
-        llaisysTensor_t attn_out2d = tensorView(attn_out3d, hidden_shape, 2);
+        llaisysTensor_t attn_out2d = tensorView(attn_out3d, q2d_shape, 2);
         llaisysTensor_t proj_out = tensorCreate(hidden_shape, 2, _config.dtype, _device, device_id);
         if (!require_tensor(attn_out2d, "attn.out2d") || !require_tensor(proj_out, "attn.proj_out")) {
             tensorDestroy(norm);
@@ -1094,9 +1094,8 @@ bool Decoder::decodePacked(const int64_t *token_ids,
         if (ok) {
             ::llaisysSelfAttentionSegmented(
                 attn_out3d, q_rope, k_all, v_all, scale, q_offsets.data(), kv_offsets.data(), nseq);
-            attn_out2d = tensorView(attn_out3d, hidden_shape, 2);
-            proj_out = tensorCreate(hidden_shape, 2, _config.dtype, _device, device_id);
-            attn_hidden = tensorCreate(hidden_shape, 2, _config.dtype, _device, device_id);
+            attn_out2d = tensorView(attn_out3d, q2d_shape, 2);
+            proj_out = tensorCreate(hidden_shape, 2, _config.dtype, _device, device_id);            attn_hidden = tensorCreate(hidden_shape, 2, _config.dtype, _device, device_id);
             if (!attn_out2d || !proj_out || !attn_hidden) ok = false;
         }
         if (ok) {
