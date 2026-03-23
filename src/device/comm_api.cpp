@@ -51,6 +51,14 @@ const LlaisysCommAPI *getUnsupportedCommAPI() {
     return &NOOP_COMM_API;
 }
 
+#ifdef ENABLE_ILUVATAR_API
+namespace ixccl {
+const LlaisysCommAPI *getCommAPI() {
+    return getUnsupportedCommAPI();
+}
+} // namespace ixccl
+#endif
+
 const LlaisysCommAPI *getCommAPI(llaisysCommBackend_t backend) {
     switch (backend) {
     case LLAISYS_COMM_NCCL:
